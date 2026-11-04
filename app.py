@@ -47,11 +47,18 @@ class Picker(tk.Toplevel):
         entry = ttk.Entry(self, textvariable=self.query)
         entry.pack(fill='x', padx=12)
         entry_undo(entry, self.query)
+        self.hide_recycling = tk.BooleanVar(value=True)
+        if recipe_names:
+            ttk.Checkbutton(self, text='Hide recycling recipes', variable=self.hide_recycling, command=self.refresh).pack(anchor='w', padx=12, pady=4)
         help_label(self, 'Filters loaded recipe IDs. Select a recipe to edit its flowchart.' if recipe_names else 'Filters loaded item and fluid IDs. Select a match to use it in the recipe.', wraplength=540)
         self.list = tk.Listbox(self, bg=BG, fg=TEXT, selectbackground='#45566c', borderwidth=0, font=('Segoe UI', 11))
         self.list.pack(fill='both', expand=True, padx=12, pady=12)
         self.list.bind('<Double-Button-%d>' % BUTTONS[app.controls['picker_button']], self.choose)
         self.list.bind(sequence(app.controls['picker_accept']), self.choose)
+        if recipe_names:
+            self.list.bind('<Button-%d>' % BUTTONS[app.controls['context_button']], self.recipe_context)
+        else:
+            self.list.bind('<Button-%d>' % BUTTONS[app.controls['context_button']], self.item_context)
         ttk.Button(self, text='Load recipe' if recipe_names else 'Select item', command=self.choose).pack(pady=(0, 12))
         self.query.trace_add('write', self.refresh)
         self.bind(sequence(app.controls['dialog_dismiss']), lambda e: self.destroy())
@@ -65,6 +72,8 @@ class Picker(tk.Toplevel):
         recent = {(('item', placed_item_name(name, data)) if kind == 'machine' else ('fluid' if kind == 'fluid' else 'item', name)): index
                   for index, (kind, name, data) in enumerate(self.app.project.creations())}
         def matches(key):
+            if self.recipe_names and self.hide_recycling.get() and 'recycling' in key[1].casefold():
+                return False
             title = self.app.catalog.items.get(key, {}).get('localised_name', '') if not self.recipe_names else ''
             searchable = re.sub(r'[\s_-]+', ' ', key[1].casefold() + ' ' + (title.casefold() if isinstance(title, str) else ''))
             return (not self.kind_filter or key[0] == self.kind_filter) and all(term in searchable for term in terms) and (not self.recipes_only or key in self.app.catalog.by_product)
@@ -75,11 +84,53 @@ class Picker(tk.Toplevel):
         if self.matches:
             self.list.selection_set(0)
 
+    def recipe_context(self, event):
+        index = self.list.nearest(event.y)
+        if not 0 <= index < len(self.matches):
+            return
+        self.list.selection_clear(0, 'end')
+        self.list.selection_set(index)
+        from creations_ui import rename_recipe
+        if hasattr(self, 'context_menu'):
+            self.context_menu.destroy()
+        self.context_menu = tk.Menu(self, tearoff=False)
+        def rename():
+            owner = self.app.nametowidget(self.app.tabs.select())
+            if rename_recipe(owner, self.matches[index][1]):
+                self.refresh()
+        self.context_menu.add_command(label='Rename recipe', command=rename)
+        self.context_menu.tk_popup(event.x_root, event.y_root)
+
     def choose(self, *_):
         if self.list.curselection():
             key = self.matches[self.list.curselection()[0]]
             self.destroy()
             self.callback(key)
+
+    def item_context(self, event):
+        index = self.list.nearest(event.y)
+        if not 0 <= index < len(self.matches):
+            return
+        self.list.selection_clear(0, 'end')
+        self.list.selection_set(index)
+        key = self.matches[index]
+        if hasattr(self, 'context_menu'):
+            self.context_menu.destroy()
+        self.context_menu = tk.Menu(self, tearoff=False)
+        from creations_ui import edit_item
+        owner = self.app.nametowidget(self.app.tabs.select())
+        self.context_menu.add_command(label='Edit item' if key[0] == 'item' else 'Edit fluid', command=lambda: edit_item(owner, key))
+        from creations_ui import rename_item
+        self.context_menu.add_command(label='Rename item' if key[0] == 'item' else 'Rename fluid', command=lambda: rename_item(owner, key))
+        from creations_ui import open_item_recipe
+        self.context_menu.add_command(label='Open recipe', command=lambda: open_item_recipe(self.app, key))
+        if key[0] == 'item':
+            from creations_ui import convert_to_machine
+            self.context_menu.add_command(label='Convert to machine', command=lambda: convert_to_machine(owner, key))
+        from creations_ui import open_all_recipes_containing
+        self.context_menu.add_command(label='Open all recipes containing this item' if key[0] == 'item' else 'Open all recipes containing this fluid',
+                                      command=lambda: open_all_recipes_containing(self.app, key))
+        self.context_menu.tk_popup(event.x_root, event.y_root)
 
 
 class RecipeTab(ttk.Frame):
@@ -101,7 +152,9 @@ class RecipeTab(ttk.Frame):
         self.graph_nodes = {}
         self.zoom = 1.0
         self.purpose = tk.StringVar()
-        ttk.Label(self, textvariable=self.purpose, padding=(12, 10, 12, 0), foreground=ACCENT).pack(anchor='w')
+        purpose_label = ttk.Label(self, textvariable=self.purpose, padding=(12, 10, 12, 0), foreground=ACCENT)
+        purpose_label.is_instruction = True
+        purpose_label.pack(anchor='w')
         self.purpose.set('NEW RECIPE — Right-click to add ingredients/results, create an item, or load a recipe.')
         top = ttk.Frame(self, padding=12)
         top.pack(fill='x')
@@ -113,7 +166,7 @@ class RecipeTab(ttk.Frame):
         settings = ttk.Frame(self, padding=(12, 0, 12, 10))
         settings.pack(fill='x')
         self.name = tk.StringVar()
-        self.seconds = tk.StringVar(value='0.5')
+        self.seconds = tk.StringVar(value='1')
         self.enabled = tk.BooleanVar(value=False)
         self.category = tk.StringVar(value='crafting')
         for label, var, width, note in [('Recipe ID', self.name, 26, 'Unique ID for a new recipe; loaded recipe IDs stay fixed.'), ('Crafting seconds', self.seconds, 10, 'Base time for one craft at machine speed 1.')]:
@@ -137,6 +190,7 @@ class RecipeTab(ttk.Frame):
         self.machine_choice = ttk.Combobox(group, textvariable=self.machine_selection, values=list(self.category_labels.values()), state='readonly', width=28)
         self.machine_choice.bind('<<ComboboxSelected>>', lambda e: self.category.set(next(k for k, v in self.category_labels.items() if v == self.machine_selection.get())))
         self.machine_choice.pack(fill='x')
+        ttk.Button(group, text='Create recipe category', command=self.create_category).pack(anchor='w', pady=4)
         help_label(group, 'Category determines compatible machines. See the machine list below.', wraplength=235, padx=0)
         self.machines_text = tk.StringVar()
         ttk.Label(self, textvariable=self.machines_text, padding=(12, 0, 12, 6), wraplength=1000, style='Help.TLabel').pack(anchor='w')
@@ -158,7 +212,7 @@ class RecipeTab(ttk.Frame):
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Button-3>', self.context)
         bind_navigation(self, self.draw)
-        ttk.Label(self, text='Click a node to edit · Drag empty space to pan · Controls can be changed in Settings → Keyboard', padding=10).pack(anchor='w')
+        help_label(self, 'Click a node to edit · Drag empty space to pan · Controls can be changed in Settings → Keyboard', wraplength=1100, padx=10)
         self.update_machines()
         self.recipe = Recipe('new-recipe', {'type': 'recipe', 'name': 'new-recipe', 'ingredients': [], 'results': []})
         self.name.set('new-recipe')
@@ -192,7 +246,7 @@ class RecipeTab(ttk.Frame):
     def update_mode(self):
         unlocks = self.app.project.recipe_unlocks(self.loaded_name, self.app.base_raw) if self.loaded_name else []
         self.enabled_button.configure(state='normal')
-        self.unlock_text.set(('Available from start: applying this edit removes all technology unlocks.' if self.enabled.get() else 'Unlocked by: ' + ', '.join(unlocks) + '. Edits keep these technology unlocks.') if unlocks else '' if self.enabled.get() else 'Locked from start. Assign a technology in Pending requirements after saving.')
+        self.unlock_text.set(('Available from start: applying this edit removes all technology unlocks.' if self.enabled.get() else 'Unlocked by: ' + ', '.join(unlocks) + '. Edits keep these technology unlocks.') if unlocks else '' if self.enabled.get() else 'Locked from start. Assign a technology in Suggested actions after saving.')
         self.commit_text.set('Apply edit' if self.loaded_name else 'Save as new recipe')
         if self.loaded_name:
             self.copy_button.pack(side='right', anchor='n', padx=(0, 8))
@@ -236,13 +290,23 @@ class RecipeTab(ttk.Frame):
         before = copy.deepcopy(self.app.project.data)
         state_before = self.snapshot()
         try:
-            if new_name in self.app.catalog.recipes:
-                raise ValueError('That recipe ID already exists. Choose a unique name for the copy.')
-            self.app.project.save_recipe(self.recipe, new_name, self.seconds.get(), bool(self.availability_override and self.enabled.get()), self.is_custom, self.category.get())
+            recipe, custom = self.recipe, self.is_custom
+            related = []
+            reused_base_id = new_name in self.app.base_raw.get('recipe', {}) and new_name in self.app.project.data.get('deleted', {}).get('recipe', {})
+            if new_name in self.app.catalog.recipes or reused_base_id:
+                replacement = self.prepare_recipe_replacement(new_name, confirm=not reused_base_id)
+                if replacement is None:
+                    return False
+                recipe, custom, related = replacement
+            self.app.project.save_recipe(recipe, new_name, self.seconds.get(), bool(self.availability_override and self.enabled.get()), custom, self.category.get())
             self.app.project.compile(Catalog(self.app.base_raw))
             self.app.persist()
             self.app.record_undo('Save recipe copy', self, state_before, before)
+            self.app.undo_stack[-1]['related'] = [(weakref.ref(tab), state) for tab, state in related]
             self.app.refresh_catalog()
+            for tab, _ in related:
+                tab.tracking = False
+                tab.load(new_name)
             # Continue editing the new copy, so export cannot apply the draft
             # to the original recipe as a side effect of saving open tabs.
             self.tracking = False
@@ -252,6 +316,35 @@ class RecipeTab(ttk.Frame):
             self.app.project.data = before
             messagebox.showerror('Cannot save recipe copy', str(exc), parent=self)
             return False
+
+    def prepare_recipe_replacement(self, name, confirm=True):
+        if confirm and not messagebox.askyesno('Recipe ID already exists',
+                f'A recipe with ID "{name}" already exists.\n\nDelete the existing recipe and replace it with this recipe? '
+                'Technology unlocks and machine assignments using this ID will be kept. Other open editors for this ID will reload. '
+                'Ctrl+Z restores the previous recipe and editor drafts.', parent=self):
+            return None
+        base = self.app.base_raw.get('recipe', {}).get(name)
+        recipe = Recipe(name, base if base is not None else self.app.catalog.recipes[name])
+        recipe.ingredients = copy.deepcopy(self.recipe.ingredients)
+        recipe.results = copy.deepcopy(self.recipe.results)
+        related = [(tab, tab.snapshot()) for tab in self.app.tabs.winfo_children()
+                   if tab is not self and isinstance(tab, RecipeTab) and (tab.loaded_name == name or tab.saved_key == name)]
+        return recipe, base is None, related
+
+    def create_category(self):
+        from editors import category_dialog
+        return category_dialog(self)
+
+    def refresh_categories(self):
+        self.category_labels = {}
+        for category in sorted(self.app.catalog.raw.get('recipe-category', {})):
+            if category.startswith('recipe-studio-only-'):
+                continue
+            kinds = [title for kind, title in [('assembling-machine', 'Assemblers'), ('furnace', 'Furnaces'), ('rocket-silo', 'Rocket silos'), ('character', 'Player')]
+                     if any(category in p.get('crafting_categories', []) for p in self.app.catalog.raw.get(kind, {}).values())]
+            self.category_labels[category] = category + (' — ' + ', '.join(kinds) if kinds else '')
+        self.machine_choice.configure(values=list(self.category_labels.values()))
+        self.update_machines()
 
     def update_machines(self):
         self.machine_selection.set(self.category_labels.get(self.category.get(), self.category.get()))
@@ -271,6 +364,15 @@ class RecipeTab(ttk.Frame):
         state_before = self.snapshot()
         try:
             name = self.loaded_name or self.name.get().strip()
+            recipe, custom = self.recipe, self.is_custom
+            replaced_editors = []
+            reused_base_id = name in self.app.base_raw.get('recipe', {}) and name in self.app.project.data.get('deleted', {}).get('recipe', {})
+            replacing = not self.loaded_name and name != self.saved_key and (name in self.app.catalog.recipes or reused_base_id)
+            if replacing:
+                replacement = self.prepare_recipe_replacement(name, confirm=not reused_base_id)
+                if replacement is None:
+                    return False
+                recipe, custom, replaced_editors = replacement
             affected_techs = []
             if self.availability_override and self.enabled.get():
                 affected_techs = self.app.project.remove_recipe_unlocks(name, self.app.base_raw)
@@ -281,13 +383,11 @@ class RecipeTab(ttk.Frame):
                 self.tracking = tracking
             if not self.dirty and self.saved_key == name:
                 return True
-            if not self.loaded_name and name in self.app.catalog.recipes:
-                raise ValueError('That recipe ID already exists. Load it to apply edits, or choose a unique name for a new recipe.')
-            self.app.project.save_recipe(self.recipe, name, self.seconds.get(), self.enabled.get(), self.is_custom, self.category.get())
+            self.app.project.save_recipe(recipe, name, self.seconds.get(), self.enabled.get(), custom, self.category.get())
             self.app.project.compile(Catalog(self.app.base_raw))
             self.app.persist()
             self.app.record_undo('Apply recipe' if self.loaded_name else 'Save new recipe', self, state_before, before)
-            related = []
+            related = [(weakref.ref(tab), state) for tab, state in replaced_editors]
             for widget in self.app.tabs.winfo_children():
                 if getattr(widget, 'selected', None) in affected_techs and hasattr(widget, 'editor_vars'):
                     related.append((weakref.ref(widget), widget.snapshot()))
@@ -302,6 +402,12 @@ class RecipeTab(ttk.Frame):
             self.dirty = False
             self.update_mode()
             self.app.refresh_catalog()
+            for tab, _ in replaced_editors:
+                tab.tracking = False
+                tab.load(name)
+            if replacing:
+                self.tracking = False
+                self.load(name)
             self.last_state = self.snapshot()
             return True
         except (ValueError, OSError, KeyError) as exc:
@@ -412,6 +518,30 @@ class RecipeTab(ttk.Frame):
         self.last_state = self.snapshot()
 
     def draw(self):
+        c = self.canvas
+        region = [float(value) for value in c.cget('scrollregion').split()]
+        position = None
+        if len(region) == 4:
+            left, top, right, bottom = region
+            position = (left + c.xview()[0] * (right-left), top + c.yview()[0] * (bottom-top))
+        try:
+            self.draw_contents()
+        finally:
+            if position is not None:
+                region = [float(value) for value in c.cget('scrollregion').split()]
+                if len(region) == 4:
+                    left, top, right, bottom = region
+                    c.xview_moveto((position[0]-left) / max(1, right-left))
+                    c.yview_moveto((position[1]-top) / max(1, bottom-top))
+
+    def draw_contents(self):
+        if getattr(self, 'time_editor', None) is not None:
+            editor, self.time_editor = self.time_editor, None
+            editor.destroy()
+        if getattr(self, 'direct_roots', None) is not None:
+            from recipe_graph import draw_recipes
+            draw_recipes(self)
+            return
         if self.expanded_recipes:
             from recipe_graph import draw_recipes
             draw_recipes(self)
@@ -430,12 +560,12 @@ class RecipeTab(ttk.Frame):
             return
         rows = max(len(self.recipe.ingredients), len(self.recipe.results), 1)
         height = max(460, rows * 120 + 120)
-        c.configure(scrollregion=(0, 0, 1040, height))
         c.create_text(190, 36, text='INGREDIENTS', fill=ACCENT, font=('Segoe UI', 12, 'bold'))
         c.create_text(820, 36, text='RESULTS', fill=ACCENT, font=('Segoe UI', 12, 'bold'))
         mid = 80 + rows * 60
-        c.create_rectangle(444, mid - 42, 596, mid + 42, fill='#364352', outline=ACCENT, width=2)
-        c.create_text(520, mid, text='CRAFT\n' + self.seconds.get() + ' seconds', fill=TEXT, font=('Segoe UI', 12), justify='center')
+        c.create_rectangle(444, mid - 42, 596, mid + 42, fill='#364352', outline=ACCENT, width=2, tags='recipe_root')
+        c.create_text(520, mid, text='CRAFT\n' + self.seconds.get() + ' seconds', fill=TEXT, font=('Segoe UI', 12), justify='center', tags='recipe_root')
+        c.tag_bind('recipe_root', select_event(self), lambda e: self.edit_crafting_time())
         for side, values in (('ingredients', self.recipe.ingredients), ('results', self.recipe.results)):
             x = 60 if side == 'ingredients' else 690
             for index, value in enumerate(values):
@@ -462,7 +592,7 @@ class RecipeTab(ttk.Frame):
                 label = value['name'].replace('-', ' ')
                 c.create_text(x + 78, y + 24, text=label, width=175, anchor='w', fill=TEXT, font=('Segoe UI', 10, 'bold'), tags=tag)
                 amount = value.get('amount', f"{value.get('amount_min', '?')}–{value.get('amount_max', '?')}")
-                probability = f" · {value['probability']:g} chance" if 'probability' in value else ''
+                probability = f" · {value['probability'] * 100:g}% chance" if 'probability' in value else ''
                 c.create_text(x + 78, y + 61, text=f'× {amount}{probability}', anchor='w', fill=ACCENT, font=('Segoe UI', 11), tags=tag)
                 c.tag_bind(tag, select_event(self), lambda e, s=side, i=index: self.edit(s, i))
         c.scale('all', 0, 0, self.zoom, self.zoom)
@@ -482,10 +612,17 @@ class RecipeTab(ttk.Frame):
         current = self.canvas.find_withtag('current')
         if current:
             for tag in self.canvas.gettags(current[0]):
+                if tag == 'recipe_root':
+                    self.recipe_delete_menu(menu)
+                    menu.tk_popup(event.x_root, event.y_root)
+                    return
                 node = self.graph_nodes.get(tag)
                 if node:
                     path = node['path']
                     if node['side'] is None:
+                        self.recipe_delete_menu(menu, path)
+                        menu.add_command(label='Add new ingredient', command=lambda p=path: self.add('ingredients', p))
+                        menu.add_command(label='Add new result', command=lambda p=path: self.add('results', p))
                         if path:
                             menu.add_command(label='Edit this recipe', command=lambda p=path: self.edit_expanded_recipe(p))
                             menu.add_command(label='Hide recipe', command=lambda p=path: self.collapse_recipes(p))
@@ -504,15 +641,28 @@ class RecipeTab(ttk.Frame):
                     return
             menu.destroy()
             return
+        self.recipe_delete_menu(menu)
         menu.add_command(label='Add new ingredient', command=lambda: self.add('ingredients'))
         menu.add_command(label='Add new result', command=lambda: self.add('results'))
         menu.add_separator()
         menu.add_command(label='Load recipe', command=self.load_recipe_picker)
         menu.add_command(label='Create item', command=self.edit_item)
         menu.add_command(label='Create item as ingredient', command=lambda: self.edit_item(as_ingredient=True))
+        menu.add_command(label='Create item as result', command=lambda: self.edit_item(as_result=True))
         from bulk_items import bulk_item_dialog
         menu.add_command(label='Bulk ingredient creation', command=lambda: bulk_item_dialog(self))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def recipe_delete_menu(self, menu, path=()):
+        menu.add_command(label='Expand all recipes', command=self.expand_all_recipes)
+        name = self.expanded_recipes.get(tuple(path), {}).get('name') if path else self.loaded_name or self.saved_key
+        from creations_ui import rename_recipe
+        target = name or (self.name.get() if not path else None)
+        if target:
+            menu.add_command(label='Rename recipe', command=lambda: rename_recipe(self, target))
+        if name in self.app.catalog.recipes:
+            from delete_items import delete_recipe
+            menu.add_command(label='Delete this recipe', command=lambda: delete_recipe(self, name))
 
     def item_context(self, menu, value, side, path):
         key = (value['type'], value['name'])
@@ -521,15 +671,122 @@ class RecipeTab(ttk.Frame):
             if path in self.expanded_recipes:
                 menu.add_command(label='Hide recipe', command=lambda: self.collapse_recipes(path))
             menu.add_separator()
+        self.recipe_delete_menu(menu, path[:-1])
+        from creations_ui import edit_item
+        menu.add_command(label='Edit item' if key[0] == 'item' else 'Edit fluid', command=lambda: edit_item(self, key))
+        from creations_ui import rename_item
+        menu.add_command(label='Rename item' if key[0] == 'item' else 'Rename fluid', command=lambda: rename_item(self, key))
+        from creations_ui import open_item_recipe
+        menu.add_command(label='Open recipe', command=lambda: open_item_recipe(self.app, key))
+        if key[0] == 'item':
+            from creations_ui import convert_to_machine
+            menu.add_command(label='Convert to machine', command=lambda: convert_to_machine(self, key))
         menu.add_command(label='Use as ingredient in new recipe', command=lambda: self.open_with_item('ingredients', key))
         menu.add_command(label='Use as product in new recipe', command=lambda: self.open_with_item('results', key))
         from creations_ui import recipes_containing
         menu.add_separator()
         menu.add_command(label='See all recipes containing this item' if key[0] == 'item' else 'See all recipes containing this fluid',
                          command=lambda: recipes_containing(self.app, key))
+        from creations_ui import load_direct_recipes
+        menu.add_command(label='Load all direct recipes', command=lambda: load_direct_recipes(self.app, key))
+        from creations_ui import open_all_recipes_containing
+        menu.add_command(label='Open all recipes containing this item' if key[0] == 'item' else 'Open all recipes containing this fluid',
+                         command=lambda: open_all_recipes_containing(self.app, key))
         from replace_ingredient import replacement_dialog
         menu.add_separator()
         menu.add_command(label='Replace ingredient in all recipes', command=lambda: replacement_dialog(self, key))
+        if not (not path[:-1] and self.result_machine and side == 'results'):
+            menu.add_separator()
+            menu.add_command(label='Delete item', command=lambda: self.delete_flowchart_item(side, path[-1], path[:-1]))
+
+    def delete_flowchart_item(self, side, index, path=()):
+        path = tuple(path)
+        if not path and self.result_machine and side == 'results':
+            return False
+        recipe, seconds = self.recipe, self.seconds.get()
+        if path:
+            _, recipe, seconds = self.chain_recipe(path)
+        values = getattr(recipe, side)
+        if not 0 <= index < len(values):
+            return False
+        expanded = copy.deepcopy(self.expanded_recipes)
+        if side == 'ingredients':
+            # Removing an ingredient also removes its branch; later sibling
+            # paths shift so their expansions stay attached to the same item.
+            expanded = {}
+            for branch, entry in self.expanded_recipes.items():
+                if len(branch) > len(path) and branch[:len(path)] == path:
+                    sibling = branch[len(path)]
+                    if sibling == index:
+                        continue
+                    if sibling > index:
+                        branch = path + (sibling - 1,) + branch[len(path)+1:]
+                expanded[branch] = copy.deepcopy(entry)
+        values.pop(index)
+        if path and not self.save_chain_recipe(path, recipe, seconds):
+            return False
+        self.expanded_recipes = expanded
+        if not path:
+            self.mark()
+        self.draw()
+        self.last_state = self.snapshot()
+        return True
+
+    def expand_all_recipes(self):
+        from core import entries
+        mined = {(e['type'], e['name']) for resource in self.app.catalog.raw.get('resource', {}).values()
+                 for e in entries(resource.get('minable', {}), 'results')}
+        original_paths = set(self.expanded_recipes)
+        expanded = copy.deepcopy(self.expanded_recipes)
+        root_name = self.loaded_name or self.name.get()
+        count = 0
+        limited = False
+        def visit(recipe, path, ancestors):
+            nonlocal count, limited
+            for index, ingredient in enumerate(recipe.ingredients):
+                key = ingredient['type'], ingredient['name']
+                child_path = path + (index,)
+                existing = expanded.get(child_path, {})
+                if key in mined and not existing:
+                    continue
+                candidates = [name for name in self.app.catalog.by_product.get(key, []) if name not in ancestors]
+                def rank(name):
+                    proto = self.app.catalog.recipes[name].get('normal', self.app.catalog.recipes[name])
+                    return (name != existing.get('name'), proto.get('category') == 'recycling' or name.endswith('-recycling'),
+                            bool(proto.get('hidden')), name != key[1], name not in self.app.project.data['recipes'], name)
+                candidates.sort(key=rank)
+                if not candidates:
+                    continue
+                name = candidates[0]
+                proto = self.app.catalog.recipes[name]
+                source = proto.get('normal', proto)
+                # Recycling is an alternate return path rather than a production
+                # dependency. Preserve explicit choices, but do not introduce it.
+                if name != existing.get('name') and (source.get('category') == 'recycling' or name.endswith('-recycling')):
+                    continue
+                if count >= 500 or len(path) >= 60:
+                    limited = True
+                    continue
+                child = self.app.project.recipe(name) if name in self.app.project.data['recipes'] else Recipe(name, proto)
+                expanded[child_path] = {'name': name, 'key': key}
+                count += 1
+                if child_path in original_paths:
+                    visit(child, child_path, ancestors | {name})
+        visit(self.recipe, (), {root_name})
+        if expanded == self.expanded_recipes:
+            return False
+        self.app.record_undo('Expand all recipes', self, self.snapshot())
+        self.expanded_recipes = expanded
+        self.draw()
+        if self.expanded_recipes:
+            self.zoom = min(self.zoom, max(.25, (max(800, self.canvas.winfo_width()) - 30) / self.graph_width))
+            self.draw()
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
+        self.last_state = self.snapshot()
+        if limited:
+            messagebox.showinfo('Large crafting chain', 'Expanded up to 500 recipe branches and 60 levels to keep the chart responsive. You can expand remaining ingredients individually.', parent=self)
+        return True
 
     def show_recipe(self, path, key, recipe_name=None):
         path = tuple(path)
@@ -582,31 +839,118 @@ class RecipeTab(ttk.Frame):
         self.draw()
         self.last_state = self.snapshot()
 
+    def chain_recipe(self, path):
+        name = self.expanded_recipes[tuple(path)]['name']
+        recipe = self.app.project.recipe(name) if name in self.app.project.data['recipes'] else Recipe(name, self.app.catalog.recipes[name])
+        settings = self.app.project.data['recipes'].get(name, {})
+        source = recipe.original.get('normal', recipe.original)
+        return name, recipe, settings.get('seconds', source.get('energy_required', .5))
+
+    def save_chain_recipe(self, path, recipe, seconds):
+        from project import positive
+        app = self.app
+        name = self.expanded_recipes[tuple(path)]['name']
+        saved = app.project.data['recipes'].get(name, {})
+        source = recipe.original.get('normal', recipe.original)
+        before = copy.deepcopy(app.project.data)
+        states = [(tab, tab.snapshot()) for tab in app.tabs.winfo_children() if isinstance(tab, RecipeTab)]
+        try:
+            app.project.save_recipe(recipe, name, positive(seconds, 'Crafting seconds'),
+                                    saved.get('enabled', source.get('enabled', True)),
+                                    saved.get('custom', False), saved.get('category', source.get('category', 'crafting')))
+            app.project.compile(Catalog(app.base_raw))
+            app.persist()
+        except (ValueError, OSError, KeyError) as exc:
+            app.project.data = before
+            messagebox.showerror('Cannot edit chain recipe', str(exc), parent=self)
+            return False
+        app.record_undo('Edit chain recipe: ' + name, self, self.snapshot(), before)
+        app.undo_stack[-1]['related'] = [(weakref.ref(tab), state) for tab, state in states if tab is not self]
+        app.refresh_catalog()
+        for tab, _ in states:
+            if tab is not self and not tab.dirty and (tab.loaded_name == name or tab.saved_key == name):
+                tab.load(name)
+        self.last_state = self.snapshot()
+        return True
+
     def edit_expanded_recipe(self, path):
-        entry = self.expanded_recipes.get(tuple(path))
-        if entry and entry['name'] in self.app.catalog.recipes:
-            from creations_ui import open_recipe
-            return open_recipe(self.app, entry['name'])
+        return self.edit_crafting_time(tuple(path), 'craft:' + '.'.join(map(str, path)))
+
+    def edit_crafting_time(self, path=(), tag='recipe_root'):
+        path = tuple(path)
+        if path:
+            _, recipe, seconds = self.chain_recipe(path)
+        else:
+            recipe, seconds = self.recipe, self.seconds.get()
+        if getattr(self, 'time_editor', None) is not None:
+            old, self.time_editor = self.time_editor, None
+            old.destroy()
+        bounds = self.canvas.bbox(tag)
+        if not bounds:
+            return
+        entry = ttk.Entry(self.canvas, width=12, justify='center')
+        entry.insert(0, str(seconds))
+        self.time_editor = entry
+        window = self.canvas.create_window((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2 + 12 * self.zoom, window=entry, tags='time-editor')
+        def close():
+            if self.time_editor is entry:
+                self.time_editor = None
+                self.canvas.delete(window)
+                entry.destroy()
+        applying = False
+        def apply(event=None):
+            nonlocal applying
+            if applying or self.time_editor is not entry:
+                return 'break'
+            from project import positive
+            applying = True
+            try:
+                value = positive(entry.get(), 'Crafting seconds')
+            except ValueError as exc:
+                messagebox.showerror('Invalid crafting time', str(exc), parent=self)
+                entry.focus_set()
+                applying = False
+                return 'break'
+            close()
+            if path:
+                self.save_chain_recipe(path, recipe, value)
+            else:
+                self.seconds.set(str(value))
+                self.draw()
+            return 'break'
+        entry.bind('<Return>', apply)
+        entry.bind('<Escape>', lambda e: (close(), 'break')[1])
+        entry.bind('<FocusOut>', apply)
+        entry.focus_set()
+        entry.selection_range(0, 'end')
+        return entry
 
     def open_with_item(self, side, key):
         tab = self.app.new_tab()
         tab.add_entry(side, key)
         return tab
 
-    def add(self, side):
+    def add(self, side, path=()):
         def selected(key):
-            self.add_entry(side, key)
+            self.add_entry(side, key, path=path)
         Picker(self.app, selected)
 
-    def add_entry(self, side, key, amount=None):
+    def add_entry(self, side, key, amount=None, path=()):
         if amount is None:
             amount = self.app.project.data['items'].get(key[1], {}).get('default_amount', 1)
+        if path:
+            _, recipe, seconds = self.chain_recipe(path)
+            getattr(recipe, side).append({'type': key[0], 'name': key[1], 'amount': amount})
+            return self.save_chain_recipe(path, recipe, seconds)
         getattr(self.recipe, side).append({'type': key[0], 'name': key[1], 'amount': amount})
         self.mark()
         self.draw()
 
-    def edit(self, side, index):
-        values = getattr(self.recipe, side)
+    def edit(self, side, index, path=()):
+        recipe, seconds = self.recipe, self.seconds.get()
+        if path:
+            _, recipe, seconds = self.chain_recipe(path)
+        values = getattr(recipe, side)
         original = values[index]
         draft = copy.deepcopy(original)
         dialog = tk.Toplevel(self.app)
@@ -617,7 +961,7 @@ class RecipeTab(ttk.Frame):
         def changed(key):
             draft['type'], draft['name'] = key
             label.set(key[1])
-        if not (self.result_machine and side == 'results'):
+        if not (not path and self.result_machine and side == 'results'):
             ttk.Button(dialog, text='Change item', command=lambda: Picker(self.app, changed)).pack()
         ttk.Label(dialog, text='Quantity (enter a number to replace a random range)', padding=10).pack()
         amount = tk.StringVar(value=str(draft.get('amount', '')))
@@ -625,7 +969,16 @@ class RecipeTab(ttk.Frame):
         amount_entry.pack(padx=16)
         entry_undo(amount_entry, amount)
         help_label(dialog, 'Amount consumed or produced by one craft. Leave blank to retain an existing random result range.')
-        ttk.Label(dialog, text='Existing temperature, probability and other properties\nare preserved unless the item is changed.', padding=12).pack()
+        chance = None
+        if side == 'results':
+            ttk.Label(dialog, text='Result chance (%)', padding=10).pack()
+            chance = tk.StringVar(value=f"{float(original.get('probability', 1)) * 100:g}")
+            chance_entry = ttk.Entry(dialog, textvariable=chance)
+            chance_entry.pack(padx=16)
+            entry_undo(chance_entry, chance)
+            help_label(dialog, 'Chance this result is produced per craft: 100 always produces it; 25 gives a 25% chance. Quantity is the amount produced when it succeeds. Use a value from 0 to 100.')
+        ttk.Label(dialog, text='Existing temperature and other properties are preserved unless the item is changed.', padding=12).pack()
+
         def save():
             try:
                 changed_item = (draft['type'], draft['name']) != (original['type'], original['name'])
@@ -642,25 +995,71 @@ class RecipeTab(ttk.Frame):
                     new.pop('amount_max', None)
                 elif changed_item:
                     raise ValueError('Enter a quantity for the new item.')
+                if chance is not None:
+                    probability = float(chance.get()) / 100
+                    if not math.isfinite(probability) or not 0 <= probability <= 1:
+                        raise ValueError('Result chance must be a number from 0 to 100 percent.')
+                    if probability == 1:
+                        new.pop('probability', None)
+                    else:
+                        new['probability'] = probability
                 values[index] = new
+                if path:
+                    if self.save_chain_recipe(path, recipe, seconds):
+                        dialog.destroy()
+                    return
                 self.mark()
                 self.draw()
                 dialog.destroy()
             except ValueError as exc:
-                messagebox.showerror('Invalid quantity', str(exc), parent=dialog)
+                messagebox.showerror('Invalid recipe result' if side == 'results' else 'Invalid quantity', str(exc), parent=dialog)
         ttk.Button(dialog, text='Save changes', command=save).pack(pady=8)
         def remove():
-            values.pop(index)
-            self.mark()
-            self.draw()
-            dialog.destroy()
-        if not (self.result_machine and side == 'results'):
+            if self.delete_flowchart_item(side, index, path):
+                dialog.destroy()
+        if not (not path and self.result_machine and side == 'results'):
             ttk.Button(dialog, text='Remove rectangle', command=remove).pack(pady=(0, 16))
 
-    def edit_item(self, as_ingredient=False):
+    def edit_item(self, as_ingredient=False, as_result=False):
         from editors import item_dialog
-        item_dialog(self, as_ingredient=as_ingredient)
+        item_dialog(self, as_ingredient=as_ingredient, as_result=as_result)
 
+
+
+class DirectRecipesTab(RecipeTab):
+    """Several real recipes, each editable in place, without a fake root recipe."""
+    def __init__(self, app, key, names, containing=False):
+        super().__init__(app)
+        for child in self.pack_slaves():
+            if child is not self.canvas.master:
+                child.pack_forget()
+        self.direct_key = key
+        self.direct_roots = {(index,): name for index, name in enumerate(names)}
+        header = ttk.Frame(self, padding=12)
+        header.pack(fill='x', before=self.canvas.master)
+        ttk.Label(header, text=('Recipes containing · ' if containing else 'Direct recipes · ') + key[1], font=('Segoe UI', 14, 'bold')).pack(anchor='w')
+        help_label(header, ('All recipes using or producing this item/fluid. ' if containing else 'Recipes whose only ingredient is this item/fluid. ') + 'Click rectangles or crafting times to edit in place. Changes are saved per recipe; Ctrl+Z restores them.', wraplength=1000, padx=0)
+        self.draw()
+
+    def save_changes(self, quiet=False):
+        return True
+
+    def snapshot(self):
+        state = super().snapshot()
+        if hasattr(self, 'direct_roots'):
+            state['direct_roots'] = copy.deepcopy(self.direct_roots)
+            state['direct_key'] = self.direct_key
+        return state
+
+    def restore(self, state):
+        if 'direct_roots' in state:
+            self.direct_roots = copy.deepcopy(state['direct_roots'])
+            self.direct_key = state.get('direct_key', self.direct_key)
+        super().restore(state)
+
+    def context(self, event):
+        if self.canvas.find_withtag('current'):
+            return super().context(event)
 
 
 class App(tk.Tk):
@@ -783,7 +1182,7 @@ class App(tk.Tk):
                     self.tabs.select(tab)
                 elif live and hasattr(tab, 'saved_name'):
                     tab.dirty = False
-                    if tab.saved_name in self.project.data['machines']:
+                    if tab.saved_name in self.project.data['machines'] or tab.saved_name in self.project.data['machine_drafts']:
                         tab.load(tab.saved_name)
                     else:
                         tab.saved_name = None
@@ -883,6 +1282,16 @@ class App(tk.Tk):
     def poll(self):
         try:
             kind, value = self.events.get_nowait()
+            if kind in ('test-started', 'test-error'):
+                self.test_button.configure(state='normal')
+                if kind == 'test-started':
+                    self.test_process, self.test_workspace = value
+                    self.test_status.set('Factorio opened for testing.')
+                else:
+                    self.test_status.set('Test could not start.')
+                    messagebox.showerror('Cannot test mod', value, parent=self)
+                self.poll_job = self.after(100, self.poll)
+                return
             self.progress.stop()
             if kind == 'error':
                 self.load_button.configure(state='normal')
@@ -894,6 +1303,9 @@ class App(tk.Tk):
                 self.workspace()
         except queue.Empty:
             pass
+        if getattr(self, 'test_process', None) is not None and self.test_process.poll() is not None:
+            self.test_process = None
+            self.test_status.set('Test session closed.')
         self.poll_job = self.after(100, self.poll)
 
     def destroy(self):
@@ -906,6 +1318,7 @@ class App(tk.Tk):
         self.loaded_items = set(getattr(self.catalog, 'loaded_items', set()))
         self.loaded_recipes = set(getattr(self.catalog, 'loaded_recipes', set()))
         self.base_raw = copy.deepcopy(self.catalog.raw)
+        self.vanilla_unlock_baseline = getattr(self.catalog, 'vanilla_unlock_baseline', {'technology': self.catalog.raw.get('technology', {}), 'recipe': self.catalog.raw.get('recipe', {})})
         toolbar = ttk.Frame(self, padding=12)
         toolbar.pack(fill='x')
         ttk.Label(toolbar, text='FACTORIO MOD CREATION TOOL\nby FuryziN', foreground=ACCENT, font=('Segoe UI', 10, 'bold')).pack(side='left', padx=(0, 14))
@@ -914,14 +1327,18 @@ class App(tk.Tk):
         self.create_machine_button = ttk.Button(toolbar, text='Create machine', command=self.new_machine_tab)
         self.create_machine_button.pack(side='left', padx=6)
         ttk.Button(toolbar, text='Browse creations', command=self.browse_creations).pack(side='left', padx=(0, 6))
-        self.pending_button = ttk.Button(toolbar, text='Pending requirements', command=self.pending_tab)
+        self.pending_button = ttk.Button(toolbar, text='Suggested actions', command=self.pending_tab)
         ttk.Button(toolbar, text='Export mod file', command=self.export_project).pack(side='right')
+        self.test_button = ttk.Button(toolbar, text='Test mod', command=self.test_mod)
+        self.test_button.pack(side='right', padx=6)
         project_bar = ttk.Frame(self, padding=(12, 0, 12, 8))
         project_bar.pack(fill='x')
         ttk.Button(project_bar, text='Save project as…', command=self.save_project_as).pack(side='left')
         ttk.Button(project_bar, text='Open project…', command=self.open_project).pack(side='left', padx=6)
         ttk.Button(project_bar, text='Settings', command=lambda: settings_dialog(self)).pack(side='left', padx=6)
         ttk.Button(project_bar, text='Read equations', command=self.equations_tab).pack(side='left', padx=6)
+        self.test_status = tk.StringVar()
+        ttk.Label(project_bar, textvariable=self.test_status).pack(side='left', padx=6)
         self.project_status = tk.StringVar(value='No saved changes')
         summary = ttk.Frame(project_bar)
         summary.pack(side='right', anchor='n')
@@ -929,10 +1346,11 @@ class App(tk.Tk):
         self.warning_area = ttk.Frame(summary)
         self.warning_area.pack(fill='x')
         self.tabs = BrowserNotebook(self)
+        self.tabs.bind('<Button-%d>' % BUTTONS[self.controls['context_button']], self.tab_context)
         self.tabs.pack(fill='both', expand=True, padx=12, pady=(0, 12))
         self.new_tab()
         self.update_pending_button()
-        if self.autosave_path.exists() and messagebox.askyesno('Restore project', 'Restore your saved recipes, items, technologies and machines?'):
+        if self.autosave_path.exists() and messagebox.askyesno('Restore project', 'Restore your saved recipes, items, technologies, machines and equation text?'):
             self.restore_project(self.autosave_path)
 
     def persist(self):
@@ -941,20 +1359,34 @@ class App(tk.Tk):
             self.project.save(self.project_path)
         self.update_project_status()
 
+    def tab_context(self, event):
+        try:
+            tab = self.nametowidget(self.tabs.tabs()[self.tabs.index('@%d,%d' % (event.x, event.y))])
+        except tk.TclError:
+            return
+        if isinstance(tab, RecipeTab):
+            from creations_ui import rename_recipe
+            if hasattr(self, 'tab_context_menu'):
+                self.tab_context_menu.destroy()
+            self.tab_context_menu = tk.Menu(self, tearoff=False)
+            self.tab_context_menu.add_command(label='Rename recipe', command=lambda: rename_recipe(tab, tab.loaded_name or tab.name.get()))
+            self.tab_context_menu.tk_popup(event.x_root, event.y_root)
+
     def update_project_status(self):
         if hasattr(self, 'project_status'):
             d = self.project.data
             deleted = sum(len(names) for names in d.get('deleted', {}).values())
-            self.project_status.set(f"Saved: {len(d['recipes'])} recipes · {len(d['items'])} items · {len(d['technologies'])} techs · {len(d['machines'])} machines" + (f' · {deleted} deleted' if deleted else ''))
+            self.project_status.set(f"Saved: {len(d['recipes'])} recipes · {len(d['items'])} items · {len(d['technologies'])} techs · {len(d['machines'])} machines · {len(d['categories'])} categories" + (f' · {deleted} deleted' if deleted else ''))
             self.update_machine_warnings()
             self.update_pending_button()
 
     def update_pending_button(self):
         if not hasattr(self, 'pending_button'):
             return
-        count = len(self.project.items_missing_icons()) + len(self.project.missing_machine_recipes(Catalog(self.base_raw))) + len(self.project.items_missing_recipes(self.catalog, self.loaded_items)) + len(self.project.items_unused(self.catalog, self.loaded_items)) + len(self.project.recipes_missing_unlocks(self.catalog, self.loaded_recipes))
-        if count:
-            self.pending_button.configure(text=f'Pending requirements ({count})')
+        count = len(self.project.items_missing_icons()) + len(self.project.missing_machine_recipes(Catalog(self.base_raw))) + len(self.project.items_missing_recipes(self.catalog, self.loaded_items)) + len(self.project.items_unused(self.catalog, self.loaded_items)) + len(self.project.recipes_missing_unlocks(self.catalog, self.loaded_recipes)) + len(self.project.doubled_technology_unlocks(self.catalog))
+        count += len(self.project.data['machine_drafts'])
+        if count or self.project.multi_technology_suggestions(self.catalog, self.vanilla_unlock_baseline, include_hidden=True):
+            self.pending_button.configure(text=f'Suggested actions ({count})' if count else 'Suggested actions')
             self.pending_button.pack(side='left', after=self.create_machine_button, padx=6)
         else:
             self.pending_button.pack_forget()
@@ -967,7 +1399,7 @@ class App(tk.Tk):
                 widget.refresh()
                 return
         tab = PendingTab(self)
-        self.tabs.add(tab, text='Pending requirements')
+        self.tabs.add(tab, text='Suggested actions')
         self.tabs.select(tab)
 
     def update_machine_warnings(self):
@@ -1014,6 +1446,7 @@ class App(tk.Tk):
         self.update_project_status()
         for widget in self.tabs.winfo_children():
             if isinstance(widget, RecipeTab):
+                widget.refresh_categories()
                 widget.update_mode()
                 widget.draw()
             elif hasattr(widget, 'refresh'):
@@ -1048,7 +1481,7 @@ class App(tk.Tk):
     def restore_project(self, path):
         try:
             project = Project.open(path)
-            if any(project.data[k] for k in ('recipes', 'items', 'technologies', 'machines', 'deleted')):
+            if any(project.data[k] for k in ('recipes', 'items', 'technologies', 'machines', 'categories', 'deleted')):
                 project.compile(Catalog(self.base_raw))
             self.project = project
             self.undo_stack.clear()
@@ -1057,6 +1490,8 @@ class App(tk.Tk):
                 tab.destroy()
             self.refresh_catalog()
             self.new_tab()
+            if self.project.data.get('equations_draft'):
+                self.equations_tab()
             self.persist()
         except (OSError, ValueError, KeyError, TypeError) as exc:
             messagebox.showerror('Cannot open project', str(exc))
@@ -1068,6 +1503,29 @@ class App(tk.Tk):
         if path:
             self.restore_project(path)
 
+    def test_mod(self):
+        if getattr(self, 'test_process', None) is not None and self.test_process.poll() is None:
+            messagebox.showinfo('Test mod', 'The test copy of Factorio is already running. Close it before starting another test.', parent=self)
+            return False
+        if str(self.test_button.cget('state')) == 'disabled' or not self.save_all():
+            return False
+        self.test_process = None
+        snapshot = copy.deepcopy(self.project.data)
+        self.test_button.configure(state='disabled')
+        self.test_status.set('Preparing test mod…')
+        def work():
+            try:
+                from core import launch_mod_test
+                cache = Path(__file__).resolve().parent / '.cache'
+                cache.mkdir(exist_ok=True)
+                workspace = Path(tempfile.mkdtemp(prefix='playtest-', dir=cache))
+                process = launch_mod_test(Project(snapshot), Catalog(self.base_raw), self.root_path, self.mods_path, workspace)
+                self.events.put(('test-started', (process, workspace)))
+            except Exception as exc:
+                self.events.put(('test-error', str(exc)))
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
     def export_project(self):
         if self.save_all():
             from editors import export_project_dialog
@@ -1075,6 +1533,12 @@ class App(tk.Tk):
 
     def new_item_tab(self):
         self.new_tab()
+
+    def direct_recipes_tab(self, key, names, containing=False):
+        tab = DirectRecipesTab(self, key, names, containing=containing)
+        self.tabs.add(tab, text=('Recipes containing: ' if containing else 'Direct recipes: ') + key[1])
+        self.tabs.select(tab)
+        return tab
 
     def equations_tab(self):
         from equations import EquationsTab

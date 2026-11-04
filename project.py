@@ -18,6 +18,16 @@ def identifier(value):
     return value
 
 
+def fuel_energy(value):
+    text = str(value).strip()
+    if not text:
+        return ''
+    match = re.fullmatch(r'(\d+(?:\.\d*)?|\.\d+)\s*([kMGTPE]?J)', text)
+    if not match or not math.isfinite(float(match[1])) or float(match[1]) <= 0:
+        raise ValueError('Fuel value must be positive energy, such as 500kJ or 4MJ. Leave blank for no fuel.')
+    return match[1] + match[2]
+
+
 def positive(value, label, integer=False):
     number = float(value)
     if not math.isfinite(number) or number <= 0 or (integer and not number.is_integer()):
@@ -63,7 +73,28 @@ class Project:
         self.data = copy.deepcopy(data or {'format': 1, 'recipes': {}, 'items': {}, 'technologies': {}})
         if self.data.get('format') != 1 or any(not isinstance(self.data.get(k), dict) for k in ('recipes', 'items', 'technologies')):
             raise ValueError('Unsupported or invalid Recipe Studio project.')
+        self.data.setdefault('hidden_multi_tech', {})
+        draft = self.data.get('equations_draft')
+        if draft is not None:
+            if (not isinstance(draft, dict) or not isinstance(draft.get('input'), list)
+                    or len(draft['input']) != 3 or not all(isinstance(v, str) for v in draft['input'])
+                    or draft.get('last_plan') is not None and not isinstance(draft['last_plan'], dict)
+                    or draft.get('applied_input') is not None and
+                    (not isinstance(draft['applied_input'], list) or len(draft['applied_input']) != 3
+                     or not all(isinstance(v, str) for v in draft['applied_input']))):
+                raise ValueError('Invalid saved equations tab.')
+        if not isinstance(self.data['hidden_multi_tech'], dict):
+            raise ValueError('Invalid hidden multi-tech suggestions.')
+        self.data.setdefault('recipe_renames', {})
+        if not isinstance(self.data['recipe_renames'], dict):
+            raise ValueError('Invalid recipe renames.')
+        self.data.setdefault('categories', {})
+        if not isinstance(self.data['categories'], dict):
+            raise ValueError('Invalid recipe categories in project.')
         self.data.setdefault('machines', {})
+        self.data.setdefault('machine_drafts', {})
+        if not isinstance(self.data['machine_drafts'], dict):
+            raise ValueError('Invalid machine drafts in project.')
         self.data.setdefault('deleted', {})
         if not isinstance(self.data['deleted'], dict) or any(not isinstance(names, dict) for names in self.data['deleted'].values()):
             raise ValueError('Invalid deleted prototypes in project.')
@@ -108,6 +139,73 @@ class Project:
         recipe = Recipe(saved['source'], saved['original'])
         recipe.ingredients, recipe.results = copy.deepcopy(saved['ingredients']), copy.deepcopy(saved['results'])
         return recipe
+
+    def rename_recipe(self, old, new, catalog, base=None, replace=False):
+        identifier(new)
+        if old not in catalog.recipes:
+            raise ValueError('Recipe is no longer loaded.')
+        if new == old:
+            return
+        if (new in catalog.recipes or new in self.data['recipes']) and not replace:
+            raise ValueError('That recipe ID already exists. Confirm replacement or choose another ID.')
+        saved = self.data['recipes'].pop(old, None)
+        if saved is None:
+            proto = (base or {}).get('recipe', {}).get(old, catalog.recipes[old])
+            source = proto.get('normal', proto)
+            self.save_recipe(Recipe(old, proto), new, source.get('energy_required', .5), source.get('enabled', True), category=source.get('category', 'crafting'))
+        else:
+            self.data['recipes'][new] = saved
+        target = self.data['recipes'][new]
+        original_target = (base or {}).get('recipe', {}).get(new)
+        if target.get('custom') and original_target is not None:
+            # A deleted base/mod ID still exists during the game's data stage;
+            # replace that prototype instead of trying to add a duplicate.
+            target.update(custom=False, source=new, original=copy.deepcopy(original_target))
+        self.data.get('deleted', {}).get('recipe', {}).pop(new, None)
+        for name, tech in catalog.raw.get('technology', {}).items():
+            if any(e.get('type') == 'unlock-recipe' and e.get('recipe') == old for e in tech.get('effects', [])):
+                record = copy.deepcopy(self.data['technologies'].get(name, {}))
+                record.update(prototype=copy.deepcopy(tech), created_at=record.get('created_at', time.time_ns()))
+                for effect in record['prototype'].get('effects', []):
+                    if effect.get('type') == 'unlock-recipe' and effect.get('recipe') == old:
+                        effect['recipe'] = new
+                seen = set()
+                effects = []
+                for effect in record['prototype'].get('effects', []):
+                    recipe = effect.get('recipe') if effect.get('type') == 'unlock-recipe' else None
+                    if recipe is not None and recipe in seen:
+                        continue
+                    if recipe is not None:
+                        seen.add(recipe)
+                    effects.append(effect)
+                record['prototype']['effects'] = effects
+                self.data['technologies'][name] = record
+        for machine in self.data['machines'].values():
+            machine['recipes'] = list(dict.fromkeys(new if n == old else n for n in machine.get('recipes', [])))
+        renames = self.data['recipe_renames']
+        renames.pop(new, None)
+        for source, target in list(renames.items()):
+            if target == old:
+                renames[source] = new
+        renames[old] = new
+        if old in catalog.raw.get('recipe', {}):
+            self.data['deleted'].setdefault('recipe', {})[old] = True
+
+    def remap_recipe_references(self, value):
+        renames = self.data['recipe_renames']
+        if isinstance(value, list):
+            for child in value:
+                self.remap_recipe_references(child)
+        elif isinstance(value, dict):
+            for field in ('recipe', 'fixed_recipe'):
+                if isinstance(value.get(field), str):
+                    value[field] = renames.get(value[field], value[field])
+            for field in ('limitation', 'limitation_blacklist'):
+                if isinstance(value.get(field), list):
+                    value[field] = [renames.get(n, n) for n in value[field]]
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    self.remap_recipe_references(child)
 
     def recipe_unlocks(self, name, base):
         technologies = dict(base.get('technology', {}))
@@ -167,6 +265,17 @@ class Project:
                 original.pop('icons', None)
             original.update(proto)
             proto = original
+        if 'fuel_value' in item:
+            value = fuel_energy(item['fuel_value'])
+            for key in ('fuel_value', 'fuel_category', 'fuel_categories'):
+                proto.pop(key, None)
+            if value:
+                proto['fuel_value'] = value
+                if kind != 'fluid':
+                    if item.get('fuel_categories'):
+                        proto['fuel_categories'] = item['fuel_categories']
+                    else:
+                        proto['fuel_category'] = item.get('fuel_category', 'chemical')
         return proto
 
     def creations(self, include_edits=False):
@@ -211,6 +320,58 @@ class Project:
                         ingredient[0] = name
         return old_key, new_key
 
+    def recipes_with_multiple_technology_unlocks(self, catalog):
+        unlocks = {}
+        for technology, proto in catalog.raw.get('technology', {}).items():
+            for effect in proto.get('effects', []):
+                if effect.get('type') == 'unlock-recipe' and effect.get('recipe') in catalog.recipes:
+                    unlocks.setdefault(effect['recipe'], set()).add(technology)
+        return [{'type': 'recipe', 'name': recipe, 'recipes': [recipe], 'technologies': sorted(technologies)}
+                for recipe, technologies in sorted(unlocks.items()) if len(technologies) >= 2]
+
+    def multi_technology_suggestions(self, catalog, vanilla_raw, include_hidden=False):
+        from core import Catalog
+        baseline = {(row['type'], row['name']): row for row in self.recipes_with_multiple_technology_unlocks(Catalog(vanilla_raw))}
+        rows = []
+        for row in self.recipes_with_multiple_technology_unlocks(catalog):
+            old = baseline.get((row['type'], row['name']))
+            if old and set(row['technologies']) <= set(old['technologies']) and set(row['recipes']) <= set(old['recipes']):
+                continue
+            token = row['type'] + ':' + row['name']
+            if include_hidden or not self.is_multi_tech_hidden(catalog, row):
+                rows.append(row)
+        return rows
+
+    def is_multi_tech_hidden(self, catalog, row):
+        from core import entries
+        hidden = self.data['hidden_multi_tech']
+        return bool(hidden.get('recipe:' + row['name']) or any(hidden.get(e['type'] + ':' + e['name']) for e in entries(catalog.recipes[row['name']], 'results')))
+
+    def doubled_technology_unlocks(self, catalog):
+        technologies = catalog.raw.get('technology', {})
+        unlocks = {name: {effect['recipe'] for effect in proto.get('effects', [])
+                         if effect.get('type') == 'unlock-recipe' and effect.get('recipe') in catalog.recipes}
+                   for name, proto in technologies.items()}
+        rows = []
+        for name in sorted(technologies):
+            if not unlocks[name]:
+                continue
+            seen = {name}
+            pending = list(technologies[name].get('prerequisites', []))
+            earlier = {}
+            while pending:
+                prerequisite = pending.pop()
+                if prerequisite in seen:
+                    continue
+                seen.add(prerequisite)
+                proto = technologies.get(prerequisite, {})
+                for recipe in unlocks[name].intersection(unlocks.get(prerequisite, set())):
+                    earlier.setdefault(recipe, []).append(prerequisite)
+                pending.extend(proto.get('prerequisites', []))
+            for recipe in sorted(earlier):
+                rows.append({'technology': name, 'recipe': recipe, 'prerequisites': sorted(earlier[recipe])})
+        return rows
+
     def items_missing_icons(self):
         return sorted(name for name, item in self.data['items'].items() if uses_default_icon(item) and not (item.get('operation') == 'edit' and not item.get('icon')))
 
@@ -218,7 +379,11 @@ class Project:
         from machine_model import placed_item_name
         keys = set(loaded_items) | {('fluid' if item.get('kind') == 'fluid' else 'item', name) for name, item in self.data['items'].items()}
         keys.difference_update(('item', placed_item_name(name, machine)) for name, machine in self.data['machines'].items())
-        return sorted(key for key in keys if key in catalog.items and not catalog.by_product.get(key))
+        from core import entries
+        mined = {(entry['type'], entry['name']) for resource in catalog.raw.get('resource', {}).values()
+                 for entry in entries(resource.get('minable', {}), 'results')}
+        mined.update(('item', name) for name, item in self.data['items'].items() if item.get('kind') == 'ore')
+        return sorted(key for key in keys if key in catalog.items and key not in mined and not catalog.by_product.get(key))
 
     def items_unused(self, catalog, loaded_items=()):
         from core import entries
@@ -241,11 +406,19 @@ class Project:
                   'original': copy.deepcopy(proto), 'stack_size': proto.get('stack_size', 100),
                   'subgroup': proto.get('subgroup', 'intermediate-product'), 'icon': None, 'icon_path': '', 'default_amount': 1,
                   'default_temperature': proto.get('default_temperature', 25)}
-        record.update({field: proto[field] for field in ('base_color', 'flow_color') if field in proto})
+        record.update({field: proto[field] for field in ('base_color', 'flow_color', 'fuel_value', 'fuel_category', 'fuel_categories') if field in proto})
         return record
 
     def merged_raw(self, base, include_machines=True):
         raw = copy.deepcopy(base)
+        for name, category in self.data['categories'].items():
+            raw.setdefault('recipe-category', {})[name] = {'type': 'recipe-category', 'name': name}
+            for kind, producer in category.get('producers', []):
+                entity = raw.get(kind, {}).get(producer)
+                if entity is not None:
+                    categories = entity.setdefault('crafting_categories', [])
+                    if name not in categories:
+                        categories.append(name)
         for name in self.data['items']:
             proto = self.item_prototype(name)
             raw.setdefault(proto['type'], {})[name] = proto
@@ -276,15 +449,33 @@ class Project:
             for effect in tech['prototype'].get('effects', []):
                 if effect.get('type') == 'unlock-recipe' and effect.get('recipe') in raw.get('recipe', {}):
                     raw['recipe'][effect['recipe']]['enabled'] = False
+        self.remap_recipe_references(raw)
         self.apply_deletions(raw)
+        self.fit_furnace_outputs(raw)
         return raw
+
+    def fit_furnace_outputs(self, raw):
+        from core import entries
+        for name in self.data['recipes']:
+            recipe = raw.get('recipe', {}).get(name)
+            if not recipe:
+                continue
+            source = recipe.get('normal', recipe)
+            count = sum(e['type'] == 'item' for e in entries(recipe, 'results'))
+            category = source.get('category', 'crafting')
+            for furnace in raw.get('furnace', {}).values():
+                if category in furnace.get('crafting_categories', []) and furnace.get('fixed_recipe', name) == name:
+                    furnace['result_inventory_size'] = max(furnace.get('result_inventory_size', 1), count)
 
     def apply_deletions(self, raw):
         deleted_recipes = self.data.get('deleted', {}).get('recipe', {})
+        deleted_techs = self.data.get('deleted', {}).get('technology', {})
         for group, names in self.data.get('deleted', {}).items():
             for name in names:
                 raw.get(group, {}).pop(name, None)
         for tech in raw.get('technology', {}).values():
+            if 'prerequisites' in tech:
+                tech['prerequisites'] = [name for name in tech['prerequisites'] if name not in deleted_techs]
             if 'effects' in tech:
                 tech['effects'] = [effect for effect in tech['effects'] if not (effect.get('type') == 'unlock-recipe' and effect.get('recipe') in deleted_recipes)]
         for module in raw.get('module', {}).values():
@@ -294,6 +485,25 @@ class Project:
         for lab in raw.get('lab', {}).values():
             if 'inputs' in lab:
                 lab['inputs'] = [name for name in lab['inputs'] if name not in self.data.get('deleted', {}).get('tool', {})]
+        if deleted_techs:
+            for shortcut in raw.get('shortcut', {}).values():
+                if shortcut.get('technology_to_unlock') in deleted_techs:
+                    shortcut.pop('technology_to_unlock')
+            def references_deleted_tech(value):
+                if isinstance(value, dict):
+                    if isinstance(value.get('technology'), str) and value['technology'] in deleted_techs:
+                        return True
+                    return any(references_deleted_tech(child) for child in value.values() if isinstance(child, (dict, list)))
+                return any(references_deleted_tech(child) for child in value) if isinstance(value, list) else False
+            for group in ('tips-and-tricks-item', 'research-achievement'):
+                prototypes = raw.get(group, {})
+                for name, prototype in list(prototypes.items()):
+                    if references_deleted_tech(prototype):
+                        del prototypes[name]
+            tips = raw.get('tips-and-tricks-item', {})
+            for tip in tips.values():
+                if 'dependencies' in tip:
+                    tip['dependencies'] = [name for name in tip['dependencies'] if name in tips]
 
     def validate_technology(self, prototype, catalog, previous=None):
         name = identifier(prototype['name'])
@@ -343,6 +553,18 @@ class Project:
 
     def compile(self, catalog):
         code, assets = [], {}
+        for name, category in self.data['categories'].items():
+            identifier(name)
+            code.append('data:extend({{type="recipe-category", name=' + lua(name) + '}})')
+            for kind, producer in category.get('producers', []):
+                if kind not in ('assembling-machine', 'furnace', 'rocket-silo', 'character') or producer not in catalog.raw.get(kind, {}):
+                    raise ValueError('Unknown producer for category ' + name + ': ' + producer)
+                code.append('do local entity = data.raw[' + lua(kind) + '][' + lua(producer) + ']\n'
+                            'entity.crafting_categories = entity.crafting_categories or {}\n'
+                            'local found = false\n'
+                            'for _, category in pairs(entity.crafting_categories) do if category == ' + lua(name) + ' then found = true end end\n'
+                            'if not found then table.insert(entity.crafting_categories, ' + lua(name) + ') end\nend')
+
         for name, item in self.data['items'].items():
             identifier(name)
             kind = item.get('kind', 'item')
@@ -358,6 +580,10 @@ class Project:
                 positive(item['stack_size'], 'Stack size', True)
             elif not math.isfinite(float(item.get('default_temperature', 25))):
                 raise ValueError('Default temperature must be a finite number.')
+            if fuel_energy(item.get('fuel_value', '')) and kind != 'fluid':
+                categories = item.get('fuel_categories') or [item.get('fuel_category', 'chemical')]
+                if any(category not in catalog.raw.get('fuel-category', {}) for category in categories):
+                    raise ValueError('Choose a loaded fuel category.')
             if item['subgroup'] not in catalog.raw.get('item-subgroup', {}):
                 raise ValueError('Unknown item subgroup: ' + item['subgroup'])
             if item.get('icon'):
@@ -366,8 +592,9 @@ class Project:
                 assets['graphics/items/' + name + '.png'] = data
             code.append('data:extend({' + lua(self.item_prototype(name)) + '})')
             if kind == 'ore':
-                from ore_model import resource, compile_resource
+                from ore_model import resource, compile_resource, resource_assets
                 code.append(compile_resource(name, item, resource(name, item, catalog.raw, self.item_prototype(name))))
+                assets.update(resource_assets(name, item))
         from machine_model import placed_item_name
         known_items = set(catalog.items) | {('fluid' if i.get('kind') == 'fluid' else 'item', n) for n, i in self.data['items'].items()} | {('item', placed_item_name(n, m)) for n, m in self.data['machines'].items()}
         for group, names in self.data.get('deleted', {}).items():
@@ -391,7 +618,7 @@ class Project:
             enabled = False if self.recipe_unlocks(name, catalog.raw) else saved['enabled']
             category = saved.get('category', recipe.original.get('normal', recipe.original).get('category', 'crafting'))
             recipe.export(name, saved['seconds'], enabled, category)
-            if catalog.raw.get('recipe-category') and category not in catalog.raw['recipe-category']:
+            if catalog.raw.get('recipe-category') and category not in catalog.raw['recipe-category'] and category not in self.data['categories']:
                 raise ValueError('Unknown recipe category: ' + category)
             for entry in recipe.ingredients + recipe.results:
                 if (entry['type'], entry['name']) not in known_items:
@@ -413,9 +640,32 @@ class Project:
             machine_code, machine_assets = compile_machines(self, catalog)
             code.append(machine_code)
             assets.update(machine_assets)
+        if self.data['recipes']:
+            code.append('do\nlocal names = ' + lua(list(self.data['recipes'])) + '\n'
+                        'for _, name in ipairs(names) do\n'
+                        '  local recipe = data.raw.recipe[name]\n'
+                        '  if recipe then\n'
+                        '    local source = recipe.normal or recipe\n'
+                        '    local count = 0\n'
+                        '    for _, product in pairs(source.results or {}) do\n'
+                        '      if (product.type or "item") == "item" then count = count + 1 end\n'
+                        '    end\n'
+                        '    for _, furnace in pairs(data.raw.furnace or {}) do\n'
+                        '      if not furnace.fixed_recipe or furnace.fixed_recipe == name then\n'
+                        '        for _, category in pairs(furnace.crafting_categories or {}) do\n'
+                        '          if category == (source.category or "crafting") then\n'
+                        '            furnace.result_inventory_size = math.max(furnace.result_inventory_size or 1, count)\n'
+                        '          end\n'
+                        '        end\n'
+                        '      end\n'
+                        '    end\n'
+                        '  end\n'
+                        'end\nend')
         merged = type(catalog)(self.merged_raw(catalog.raw))
         for name, tech in self.data['technologies'].items():
             proto = copy.deepcopy(tech['prototype'])
+            if 'prerequisites' in proto:
+                proto['prerequisites'] = [n for n in proto['prerequisites'] if n not in self.data.get('deleted', {}).get('technology', {})]
             if 'effects' in proto:
                 proto['effects'] = [e for e in proto['effects'] if not (e.get('type') == 'unlock-recipe' and e.get('recipe') in self.data.get('deleted', {}).get('recipe', {}))]
             self.validate_technology(proto, merged, previous=name)
@@ -430,11 +680,20 @@ class Project:
                 proto['icon'] = '__RECIPE_STUDIO_MOD__/graphics/technologies/' + name + '.png'
                 proto['icon_size'] = tech['icon']['size']
             code.append('data:extend({' + lua(proto) + '})')
+        if self.data['recipe_renames']:
+            code.append('do\nlocal renames = ' + lua(self.data['recipe_renames']) + '\n'
+                        'local function remap(value)\n'
+                        '  if type(value) ~= "table" then return end\n'
+                        '  for _, field in ipairs({"recipe", "fixed_recipe"}) do if type(value[field]) == "string" then value[field] = renames[value[field]] or value[field] end end\n'
+                        '  for _, field in ipairs({"limitation", "limitation_blacklist"}) do if type(value[field]) == "table" then for i, name in pairs(value[field]) do value[field][i] = renames[name] or name end end end\n'
+                        '  for _, child in pairs(value) do if type(child) == "table" then remap(child) end end\n'
+                        'end\nremap(data.raw)\nend')
         if any(self.data.get('deleted', {}).values()):
             deleted = self.data['deleted']
             code.append('do\nlocal deleted = ' + lua(deleted) + '\n'
                         'for kind, names in pairs(deleted) do for name in pairs(names) do if data.raw[kind] then data.raw[kind][name] = nil end end end\n'
                         'for _, tech in pairs(data.raw.technology or {}) do\n'
+                        '  if tech.prerequisites then local names = {}; for _, name in pairs(tech.prerequisites) do if not (deleted.technology or {})[name] then names[#names+1] = name end end; tech.prerequisites = names end\n'
                         '  if tech.effects then local effects = {}; for _, effect in pairs(tech.effects) do\n'
                         '    if not (effect.type == "unlock-recipe" and (deleted.recipe or {})[effect.recipe]) then effects[#effects+1] = effect end\n'
                         '  end; tech.effects = effects end\nend\n'
@@ -443,7 +702,23 @@ class Project:
                         'end end\n'
                         'for _, lab in pairs(data.raw.lab or {}) do local inputs = {}; for _, name in pairs(lab.inputs or {}) do\n'
                         '  if not (deleted.tool or {})[name] then inputs[#inputs+1] = name end\n'
-                        'end; lab.inputs = inputs end\nend')
+                        'end; lab.inputs = inputs end\n'
+                        'if next(deleted.technology or {}) then\n'
+                        '  for _, shortcut in pairs(data.raw.shortcut or {}) do if (deleted.technology or {})[shortcut.technology_to_unlock or ""] then shortcut.technology_to_unlock = nil end end\n'
+                        '  local function references_deleted_tech(value)\n'
+                        '    if type(value) ~= "table" then return false end\n'
+                        '    if type(value.technology) == "string" and (deleted.technology or {})[value.technology] then return true end\n'
+                        '    for _, child in pairs(value) do if type(child) == "table" and references_deleted_tech(child) then return true end end\n'
+                        '    return false\n'
+                        '  end\n'
+                        '  for _, kind in ipairs({"tips-and-tricks-item", "research-achievement"}) do\n'
+                        '    local remove = {}; for name, prototype in pairs(data.raw[kind] or {}) do if references_deleted_tech(prototype) then remove[#remove+1] = name end end\n'
+                        '    for _, name in ipairs(remove) do data.raw[kind][name] = nil end\n'
+                        '  end\n'
+                        '  for _, tip in pairs(data.raw["tips-and-tricks-item"] or {}) do\n'
+                        '    if tip.dependencies then local names = {}; for _, name in pairs(tip.dependencies) do if data.raw["tips-and-tricks-item"][name] then names[#names+1] = name end end; tip.dependencies = names end\n'
+                        '  end\n'
+                        'end\nend')
         if not code:
             raise ValueError('Save at least one recipe, item, technology or machine first.')
         return '\n\n'.join(code), assets
@@ -522,11 +797,20 @@ class Project:
                     changes = diff(original, after)
                     if changes:
                         result.append({'type': group, 'name': name, 'operation': 'modified', 'changes': changes})
+        if self.data.get('deleted', {}).get('technology'):
+            for group in ('technology', 'tips-and-tricks-item', 'research-achievement', 'shortcut'):
+                for name, before in catalog.raw.get(group, {}).items():
+                    if name in self.data.get('deleted', {}).get(group, {}) or (group == 'technology' and name in self.data['technologies']):
+                        continue
+                    after = merged.get(group, {}).get(name)
+                    changes = diff(before, after)
+                    if changes:
+                        result.append({'type': group, 'name': name, 'operation': 'deleted' if after is None else 'modified', 'changes': changes})
         if self.data['machines']:
             from machine_model import machine_kind
             for name, machine in self.data['machines'].items():
                 item_name = placed_item_name(name, machine)
-                for kind, prototype_name in ((machine_kind(machine), name), ('item', item_name)):
+                for kind, prototype_name in ((machine_kind(machine), name), (machine.get('item_type', 'item'), item_name)):
                     before = catalog.raw.get(kind, {}).get(prototype_name)
                     result.append({'type': kind, 'name': prototype_name, 'operation': 'added' if before is None else 'modified', 'changes': diff(before, merged[kind][prototype_name])})
             # Include the recipe categories and producer compatibility additions.

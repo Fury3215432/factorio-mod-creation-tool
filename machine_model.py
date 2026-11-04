@@ -1,18 +1,96 @@
 """Placeable crafting machines built from valid game templates."""
 import base64
 import copy
+import math
+import hashlib
+import json
 import re
 import struct
 from pathlib import Path
 
 from core import entries, lua
-from machine_geometry import dimensions, resize_entity
+from machine_geometry import dimensions, resize_entity, transform_graphics, shift_graphics
 
 MACHINE_TYPES = ('assembling-machine', 'furnace', 'mining-drill', 'rocket-silo')
+ENERGY_SWITCH_TYPES = MACHINE_TYPES + ('agricultural-tower', 'boiler', 'inserter', 'lab', 'offshore-pump', 'pump', 'radar', 'reactor')
+
+
+def validate_energy(machine, source, catalog):
+    from project import positive
+    if machine['energy_type'] not in ('electric', 'burner', source.get('energy_source', {}).get('type')):
+        raise ValueError('Choose electric, burner, or the building’s original energy source.')
+    if machine['energy_type'] != 'burner':
+        return
+    categories=machine.get('fuel_categories',source.get('energy_source',{}).get('fuel_categories',['chemical']))
+    if not categories or any(c not in catalog.raw.get('fuel-category',{}) for c in categories):
+        raise ValueError('Select valid fuel categories, such as chemical for coal and wood.')
+    positive(machine.get('fuel_inventory_size',source.get('energy_source',{}).get('fuel_inventory_size',1)),'Fuel inventory slots',True)
+    burnt=machine.get('burnt_inventory_size',source.get('energy_source',{}).get('burnt_inventory_size',1))
+    if not isinstance(burnt,int) or not 0<=burnt<=255:
+        raise ValueError('Burnt fuel slots must be a whole number from 0 to 255.')
+
+
+def apply_energy(machine, entity):
+    original=entity.get('energy_source',{})
+    desired=machine['energy_type']
+    if original.get('type') != desired:
+        common={k:copy.deepcopy(original[k]) for k in ('emissions_per_minute','render_no_power_icon','render_no_network_icon') if k in original}
+        original=dict(common,type='electric',usage_priority='secondary-input') if desired=='electric' else dict(common,type='burner',fuel_categories=['chemical'],fuel_inventory_size=1,burnt_inventory_size=1,effectivity=1)
+        entity['energy_source']=original
+    if desired=='burner':
+        for key in ('fuel_categories','fuel_inventory_size','burnt_inventory_size'):
+            if key in machine:
+                original[key]=copy.deepcopy(machine[key])
 CONTROLLED = {'name', 'type', 'localised_name', 'localised_description', 'max_health', 'crafting_speed', 'mining_speed',
               'energy_usage', 'module_slots', 'module_specification', 'crafting_categories', 'resource_categories',
               'resource_searching_radius', 'resource_drain_rate_percent', 'selection_box', 'collision_box', 'tile_width', 'tile_height',
               'icon', 'icons', 'icon_size', 'minable', 'placeable_by'}
+
+
+def editable_buildings(catalog):
+    result = set()
+    for item in catalog.items.values():
+        name = item.get('place_result')
+        if not name:
+            continue
+        for kind, group in catalog.raw.items():
+            entity = group.get(name)
+            if entity and entity.get('selection_box') and kind not in ('item', 'recipe'):
+                result.add((kind, name))
+    return sorted(result)
+
+
+def controlled_fields(kind):
+    if kind in MACHINE_TYPES:
+        return CONTROLLED
+    return CONTROLLED - {'crafting_speed', 'mining_speed', 'energy_usage', 'module_slots', 'module_specification',
+                         'crafting_categories', 'resource_categories', 'resource_searching_radius', 'resource_drain_rate_percent'}
+
+
+ZERO_SOURCE = '__from-zero__'
+
+
+def machine_source(raw, machine):
+    if machine.get('template') == ZERO_SOURCE:
+        return {'type': 'assembling-machine', 'name': ZERO_SOURCE, 'max_health': 300,
+                'flags': ['placeable-neutral', 'placeable-player', 'player-creation'],
+                'collision_box': [[-1.2, -1.2], [1.2, 1.2]], 'selection_box': [[-1.5, -1.5], [1.5, 1.5]],
+                'minable': {'mining_time': .2, 'result': ZERO_SOURCE}, 'crafting_categories': ['crafting'],
+                'crafting_speed': 1, 'energy_usage': '150kW',
+                'energy_source': {'type': 'electric', 'usage_priority': 'secondary-input', 'emissions_per_minute': {'pollution': 2}},
+                'graphics_set': {}, 'module_slots': 0}
+    return raw.get(machine_kind(machine), {}).get(machine['template'])
+
+
+def zero_config():
+    from project import default_icon_asset
+    source = machine_source({}, {'template': ZERO_SOURCE})
+    return {'template': ZERO_SOURCE, 'entity_type': 'assembling-machine', 'operation': 'create',
+            'title': '', 'description': '', 'stack_size': 50, 'health': 300, 'speed': 1,
+            'power': '150kW', 'energy_type': 'electric', 'module_slots': 0, 'width': 3, 'height': 3,
+            'color': '#ffffff', 'resource_categories': ['basic-solid'], 'mining_radius': 2.49, 'resource_drain': 100,
+            'recipes': [], 'advanced': {k: v for k, v in source.items() if k not in CONTROLLED},
+            'icon': default_icon_asset(), 'sprite': None, 'icon_path': '', 'sprite_path': '', 'item_name': None}
 
 
 def machine_kind(machine):
@@ -38,8 +116,8 @@ def source_config(kind, name, catalog):
             'width': max(1, round(width)), 'height': max(1, round(height)), 'color': '#ffffff',
             'mining_radius': source.get('resource_searching_radius', 2.49), 'resource_categories': source.get('resource_categories', ['basic-solid']),
             'resource_drain': source.get('resource_drain_rate_percent', 100), 'recipes': importable_recipes(catalog, [(kind, name)]) if kind != 'mining-drill' else [],
-            'advanced': {k: copy.deepcopy(v) for k, v in source.items() if k not in CONTROLLED},
-            'item_name': item_name, 'icon': None, 'sprite': None, 'icon_path': '', 'sprite_path': ''}
+            'advanced': {k: copy.deepcopy(v) for k, v in source.items() if k not in controlled_fields(kind)},
+            'item_name': item_name, 'item_type': item.get('type', 'item'), 'icon': None, 'sprite': None, 'icon_path': '', 'sprite_path': ''}
 
 
 def sprite_asset(path):
@@ -53,28 +131,77 @@ def sprite_asset(path):
     return {'data': base64.b64encode(data).decode('ascii'), 'width': width, 'height': height}
 
 
+def animation_settings(machine):
+    """Validate a row-major sprite sheet; zero frame dimensions use the full PNG."""
+    from project import positive
+    asset = machine.get('sprite')
+    if not asset:
+        return None
+    width = positive(machine.get('frame_width') or asset['width'], 'Frame width', True)
+    height = positive(machine.get('frame_height') or asset['height'], 'Frame height', True)
+    count = positive(machine.get('frame_count', 1), 'Frame count', True)
+    columns = positive(machine.get('line_length', 1), 'Frames per row', True)
+    speed = positive(machine.get('animation_speed', 1), 'Animation speed')
+    mode = machine.get('run_mode', 'forward')
+    if mode not in ('forward', 'backward', 'forward-then-backward'):
+        raise ValueError('Choose a valid animation playback mode.')
+    if width * min(count, columns) > asset['width'] or height * ((count + columns - 1) // columns) > asset['height']:
+        raise ValueError('The frame dimensions, count and frames per row do not fit inside the building PNG.')
+    return dict(width=width, height=height, frame_count=count, line_length=columns, animation_speed=speed, run_mode=mode)
+
+
+def sprite_layout_digest(asset, settings):
+    payload = [asset['data']] + [settings[key] for key in ('width','height','frame_count','line_length')]
+    return hashlib.sha256(json.dumps(payload,separators=(',',':')).encode('utf-8')).hexdigest()
+
+
+def matching_shadow(machine):
+    shadow = machine.get('shadow')
+    if not shadow:
+        return None
+    settings = animation_settings(machine)
+    if settings is None or shadow.get('source_digest') != sprite_layout_digest(machine['sprite'],settings):
+        raise ValueError('The building sprite or frame layout changed. Recreate or remove shadows before saving.')
+    if min(shadow.get('frame_width',0),shadow.get('frame_height',0)) <= 0:
+        raise ValueError('Invalid generated shadow frame dimensions.')
+    if shadow['frame_width']*min(settings['frame_count'],settings['line_length']) > shadow['width'] or shadow['frame_height']*math.ceil(settings['frame_count']/settings['line_length']) > shadow['height']:
+        raise ValueError('Generated shadow frames do not fit their sprite sheet.')
+    return shadow
+
+
 def recipe_category(name):
     return 'recipe-studio-only-' + name
 
 
 def validate_machine(name, machine, catalog, project):
+    converting = machine.get('converted_item') == name
     from project import identifier, positive
     identifier(name)
+    animation_settings(machine)
+    matching_shadow(machine)
     editing = machine.get('operation') == 'edit'
     kind = machine_kind(machine)
     if editing and (name != machine['template'] or name not in catalog.raw.get(kind, {})):
         raise ValueError('Edit mode must keep the selected machine’s original ID.')
-    if not editing and (('item', name) in catalog.items or ('fluid', name) in catalog.items or name in project.data['items']):
+    if not editing and not converting and (('item', name) in catalog.items or ('fluid', name) in catalog.items or name in project.data['items']):
         raise ValueError('Machine ID already belongs to a loaded or custom item: ' + name)
-    if not editing and name in catalog.recipes:
+    if not editing and not converting and name in catalog.recipes:
         raise ValueError('Machine ID already belongs to a recipe: ' + name)
-    if not editing and any(name in group for group in catalog.raw.values()):
+    if not editing and any(name in group for kind, group in catalog.raw.items() if not converting or kind in ('assembling-machine', 'furnace', 'mining-drill', 'resource')):
         raise ValueError('That prototype ID already exists. Choose a unique machine ID.')
-    source = catalog.raw.get(kind, {}).get(machine['template'])
+    source = machine_source(catalog.raw, machine)
+    if machine['template'] == ZERO_SOURCE and not machine.get('sprite'):
+        raise ValueError('Add a Building PNG or animation sprite sheet for your new machine.')
     if source is None:
         raise ValueError('Choose a loaded machine or mining-drill template.')
-    if not isinstance(machine.get('advanced', {}), dict) or any(k in CONTROLLED for k in machine.get('advanced', {})):
+    if not isinstance(machine.get('advanced', {}), dict) or any(k in controlled_fields(kind) for k in machine.get('advanced', {})):
         raise ValueError('Advanced stats must be a JSON object; identity and basic stats belong in their form fields.')
+    visual_scale = positive(machine.get('visual_scale', 1), 'Visual scale')
+    if visual_scale > 16:
+        raise ValueError('Visual scale cannot exceed 16.')
+    for key in ('sprite_offset_x', 'sprite_offset_y'):
+        if not math.isfinite(float(machine.get(key, 0))):
+            raise ValueError('Sprite offsets must be finite numbers in tiles.')
     for key in ('width', 'height'):
         size = positive(machine.get(key, round(dimensions(source)[0 if key == 'width' else 1])), 'Placed ' + key, True)
         if size > 64:
@@ -83,6 +210,12 @@ def validate_machine(name, machine, catalog, project):
         raise ValueError('Color must be a hex color, such as #77bbff.')
     for key in ('stack_size', 'health'):
         positive(machine[key], key.replace('_', ' ').title(), True)
+    if kind in ENERGY_SWITCH_TYPES:
+        validate_energy(machine,source,catalog)
+    if kind not in MACHINE_TYPES:
+        if machine.get('sprite'):
+            raise ValueError('Edit this building’s graphics in All other stats (JSON); the crafting-machine sprite override is not compatible with this entity type.')
+        return
     positive(machine['speed'], 'Crafting speed')
     if machine['energy_type'] not in ('electric', 'burner', source.get('energy_source', {}).get('type')):
         raise ValueError('Choose electric, burner, or the template’s original energy source.')
@@ -105,9 +238,12 @@ def validate_machine(name, machine, catalog, project):
     merged = project.merged_raw(catalog.raw, include_machines=False)
     recipes = merged.get('recipe', {})
     selected = machine.get('recipes', [])
-    if not selected or len(selected) != len(set(selected)):
-        raise ValueError('Select at least one recipe; do not repeat recipes.')
-    boxes = source.get('fluid_boxes', [])
+    if len(selected) != len(set(selected)):
+        raise ValueError('Do not repeat allowed recipes.')
+    for category in machine.get('categories', []):
+        if category not in merged.get('recipe-category', {}):
+            raise ValueError('Unknown recipe category: ' + category)
+    boxes = machine.get('advanced', {}).get('fluid_boxes', source.get('fluid_boxes', []))
     if not isinstance(boxes, list):
         boxes = [v for v in boxes.values() if isinstance(v, dict) and 'production_type' in v]
     # Verify real pipe capacity, so selected recipes can actually run.
@@ -128,11 +264,11 @@ def validate_machine(name, machine, catalog, project):
 
 def prototypes(name, machine, raw):
     kind = machine_kind(machine)
-    original = raw[kind][machine['template']]
+    original = machine_source(raw, machine)
     entity = copy.deepcopy(original)
     if 'advanced' in machine:
         for key in list(entity):
-            if key not in CONTROLLED and key not in machine['advanced']:
+            if key not in controlled_fields(kind) and key not in machine['advanced']:
                 entity.pop(key)
         entity.update(copy.deepcopy(machine['advanced']))
     remove = ['placeable_by', 'icons', 'icon', 'icon_size']
@@ -141,44 +277,77 @@ def prototypes(name, machine, raw):
     for key in remove:
         entity.pop(key, None)
     icon = {k: copy.deepcopy(original[k]) for k in ('icon', 'icons', 'icon_size') if k in original}
+    if machine.get('converted_item'):
+        icon = {k: copy.deepcopy(machine.get('converted_original', {})[k]) for k in ('icon', 'icons', 'icon_size') if k in machine.get('converted_original', {})}
     if machine.get('icon'):
         icon = {'icon': '__RECIPE_STUDIO_MOD__/graphics/machines/' + name + '-icon.png', 'icon_size': machine['icon']['size']}
     entity.update(icon)
     item_name = placed_item_name(name, machine)
-    minable = copy.deepcopy(original.get('minable') or {})
-    minable.pop('results', None)
-    minable.update(mining_time=minable.get('mining_time', .2), result=item_name)
-    entity.update(name=name, type=kind, localised_name=machine['title'], localised_description=machine.get('description', ''),
-                  minable=minable, placeable_by={'item': item_name, 'count': 1},
-                  flags=entity.get('flags', ['placeable-neutral', 'placeable-player', 'player-creation']), max_health=machine['health'],
-                  energy_usage=machine['power'])
-    if kind == 'mining-drill':
-        entity.update(mining_speed=machine['speed'], resource_categories=machine.get('resource_categories', original.get('resource_categories', ['basic-solid'])), resource_searching_radius=machine.get('mining_radius', original.get('resource_searching_radius', 1)))
-        if 'resource_drain_rate_percent' in original or machine.get('resource_drain', 100) != 100:
-            entity['resource_drain_rate_percent'] = machine.get('resource_drain', 100)
+    if kind not in MACHINE_TYPES:
+        entity.update(name=name, type=kind, localised_name=machine['title'], localised_description=machine.get('description', ''))
+        if 'max_health' in original:
+            entity['max_health'] = machine['health']
+        if machine.get('operation') != 'edit':
+            entity['minable'] = {'mining_time': .2, 'result': item_name}
+            entity['placeable_by'] = {'item': item_name, 'count': 1}
     else:
-        entity.update(crafting_speed=machine['speed'], crafting_categories=[recipe_category(n) for n in machine['recipes']])
-        if kind == 'assembling-machine':
-            entity['ingredient_count'] = 255
-    if entity.get('energy_source', {}).get('type') != machine['energy_type']:
-        entity['energy_source'] = {'type': 'electric', 'usage_priority': 'secondary-input'} if machine['energy_type'] == 'electric' else {'type': 'burner', 'fuel_categories': ['chemical'], 'fuel_inventory_size': 1, 'burnt_inventory_size': 1, 'effectivity': 1}
-    if 'module_specification' in entity:
-        entity['module_specification']['module_slots'] = machine.get('module_slots', 0)
-    else:
-        entity['module_slots'] = machine.get('module_slots', 0)
+        minable = copy.deepcopy(original.get('minable') or {})
+        minable.pop('results', None)
+        minable.update(mining_time=minable.get('mining_time', .2), result=item_name)
+        entity.update(name=name, type=kind, localised_name=machine['title'], localised_description=machine.get('description', ''),
+                      minable=minable, placeable_by={'item': item_name, 'count': 1},
+                      flags=entity.get('flags', ['placeable-neutral', 'placeable-player', 'player-creation']), max_health=machine['health'],
+                      energy_usage=machine['power'])
+        if kind == 'mining-drill':
+            entity.update(mining_speed=machine['speed'], resource_categories=machine.get('resource_categories', original.get('resource_categories', ['basic-solid'])), resource_searching_radius=machine.get('mining_radius', original.get('resource_searching_radius', 1)))
+            if 'resource_drain_rate_percent' in original or machine.get('resource_drain', 100) != 100:
+                entity['resource_drain_rate_percent'] = machine.get('resource_drain', 100)
+        elif kind in MACHINE_TYPES:
+            entity.update(crafting_speed=machine['speed'], crafting_categories=list(dict.fromkeys(machine.get('categories', []) + [recipe_category(n) for n in machine['recipes']])) or ['recipe-studio-empty-' + name])
+            if kind == 'assembling-machine':
+                entity['ingredient_count'] = 255
+        if 'module_specification' in entity:
+            entity['module_specification']['module_slots'] = machine.get('module_slots', 0)
+        else:
+            entity['module_slots'] = machine.get('module_slots', 0)
+    if kind in ENERGY_SWITCH_TYPES:
+        apply_energy(machine,entity)
     width, height = dimensions(original)
     color = machine.get('color', '#ffffff')
     rgba = [int(color[i:i+2], 16) / 255 for i in (1, 3, 5)] + [1]
-    resize_entity(entity, machine.get('width', round(width)), machine.get('height', round(height)), width, height, rgba)
+    if kind not in MACHINE_TYPES and machine.get('width') == max(1, round(width)) and machine.get('height') == max(1, round(height)):
+        for key in ('graphics_set', 'animation', 'animations', 'pictures', 'picture', 'structure', 'horizontal_animation', 'vertical_animation'):
+            if key in entity:
+                transform_graphics(entity[key], 1, rgba)
+    else:
+        resize_entity(entity, machine.get('width', round(width)), machine.get('height', round(height)), width, height, rgba)
     if machine.get('sprite'):
         asset = machine['sprite']
-        animation = {'filename': '__RECIPE_STUDIO_MOD__/graphics/machines/' + name + '-building.png', 'width': asset['width'], 'height': asset['height'], 'frame_count': 1, 'scale': min(machine.get('width', width) * 32 / asset['width'], machine.get('height', height) * 32 / asset['height']), 'tint': rgba}
+        settings = animation_settings(machine)
+        animation = dict(settings, filename='__RECIPE_STUDIO_MOD__/graphics/machines/' + name + '-building.png',
+                         scale=min(machine.get('width', width) * 32 / settings['width'], machine.get('height', height) * 32 / settings['height']), tint=rgba)
+        shadow = matching_shadow(machine)
+        if shadow:
+            shadow_animation = dict(settings, filename='__RECIPE_STUDIO_MOD__/graphics/machines/' + name + '-shadow.png',
+                width=shadow['frame_width'],height=shadow['frame_height'],draw_as_shadow=True,scale=animation['scale'],
+                shift=[pixel*animation['scale']/32 for pixel in shadow['shift_pixels']])
+            animation = {'layers':[animation,shadow_animation]}
         if 'graphics_set' in entity:
             entity['graphics_set'] = {'animation': animation}
         else:
             entity['animation'] = animation
             entity.pop('working_visualisations', None)
-    item = copy.deepcopy(raw.get('item', {}).get(item_name, {})) if machine.get('operation') == 'edit' else {}
+    offset = [float(machine.get('sprite_offset_x', 0)), float(machine.get('sprite_offset_y', 0))]
+    visual_scale = machine.get('visual_scale', 1)
+    if visual_scale != 1:
+        for key in ('graphics_set', 'wet_mining_graphics_set', 'animation', 'animations', 'pictures', 'picture', 'base_picture', 'working_visualisations', 'idle_animation', 'structure', 'horizontal_animation', 'vertical_animation'):
+            if key in entity:
+                transform_graphics(entity[key], visual_scale, [1, 1, 1, 1])
+    if offset != [0, 0]:
+        for key in ('graphics_set', 'wet_mining_graphics_set', 'animation', 'animations', 'pictures', 'picture', 'base_picture', 'working_visualisations', 'idle_animation', 'structure', 'horizontal_animation', 'vertical_animation', 'chargable_graphics', 'integration_patch'):
+            if key in entity:
+                shift_graphics(entity[key], offset)
+    item = copy.deepcopy(machine.get('converted_original', {})) if machine.get('converted_item') else copy.deepcopy(raw.get(machine.get('item_type', 'item'), {}).get(item_name, {})) if machine.get('operation') == 'edit' else {}
     item.update({'type': item.get('type', 'item'), 'name': item_name, 'localised_name': machine['title'], 'localised_description': machine.get('description', ''),
             'subgroup': 'production-machine', 'order': 'z[' + name + ']', 'stack_size': machine['stack_size'], 'place_result': name, **icon}
     )
@@ -187,12 +356,14 @@ def prototypes(name, machine, raw):
 
 def apply_machines(raw, machines):
     templates = dict(raw)
-    templates.update(copy.deepcopy({kind: raw.get(kind, {}) for kind in MACHINE_TYPES}))
+    templates.update(copy.deepcopy({machine_kind(m): raw.get(machine_kind(m), {}) for m in machines.values()}))
     templates['item'] = copy.deepcopy(raw.get('item', {}))
     for name, machine in machines.items():
         entity, item = prototypes(name, machine, templates)
-        raw.setdefault('item', {})[item['name']] = item
+        raw.setdefault(item['type'], {})[item['name']] = item
         raw.setdefault(machine_kind(machine), {})[name] = entity
+        for category in entity.get('crafting_categories', []):
+            raw.setdefault('recipe-category', {}).setdefault(category, {'type': 'recipe-category', 'name': category})
     for kind in MACHINE_TYPES:
         for entity in raw.get(kind, {}).values():
             target = raw.get(kind, {}).get(entity.get('next_upgrade'))
@@ -208,7 +379,7 @@ def apply_machines(raw, machines):
         recipe['category'] = category
         for kind in ('assembling-machine', 'furnace', 'character', 'rocket-silo'):
             for name, entity in raw.get(kind, {}).items():
-                if name not in machines and old_category in entity.get('crafting_categories', []):
+                if (name not in machines or old_category in machines[name].get('categories', [])) and old_category in entity.get('crafting_categories', []):
                     if category not in entity['crafting_categories']:
                         entity['crafting_categories'].append(category)
 
@@ -219,14 +390,19 @@ def compile_machines(project, catalog):
     raw = project.merged_raw(catalog.raw, include_machines=False)
     snapshots = ['do', 'local studio_templates = {}']
     for kind, template in sorted({(machine_kind(m), m['template']) for m in machines.values()}):
-        snapshots.append('studio_templates[' + lua(kind + '/' + template) + '] = table.deepcopy(assert(data.raw[' + lua(kind) + '][' + lua(template) + ']))')
+        if template == ZERO_SOURCE:
+            snapshots.append('studio_templates[' + lua(kind + '/' + template) + '] = ' + lua(machine_source(raw, {'template': ZERO_SOURCE})))
+        else:
+            snapshots.append('studio_templates[' + lua(kind + '/' + template) + '] = table.deepcopy(assert(data.raw[' + lua(kind) + '][' + lua(template) + ']))')
     for name, machine in machines.items():
         validate_machine(name, machine, catalog, project)
         entity, item = prototypes(name, machine, raw)
         # Clone the engine's actual template at mod load time, rather than
         # serializing its graphics, sounds and circuit connector definitions.
-        source = raw[machine_kind(machine)][machine['template']]
+        source = machine_source(raw, machine)
         overrides = {k: v for k, v in entity.items() if k not in source or v != source[k]}
+        if not machine.get('recipes') and not machine.get('categories') and machine_kind(machine) in ('assembling-machine', 'furnace', 'rocket-silo'):
+            code.append('data:extend({{type="recipe-category", name=' + lua('recipe-studio-empty-' + name) + '}})')
         lines = ['do', 'local entity = table.deepcopy(studio_templates[' + lua(machine_kind(machine) + '/' + machine['template']) + '])']
         for key in (set(source) - set(entity)) | {'placeable_by', 'icons', 'icon', 'icon_size'}:
             lines.append('entity[' + lua(key) + '] = nil')
@@ -237,7 +413,7 @@ def compile_machines(project, catalog):
             lines.append('entity[' + lua(key) + '] = ' + lua(value))
         lines += ['data:extend({entity, ' + lua(item) + '})', 'end']
         code.append('\n'.join(lines))
-        for key, suffix in [('icon', '-icon.png'), ('sprite', '-building.png')]:
+        for key, suffix in [('icon', '-icon.png'), ('sprite', '-building.png'), ('shadow', '-shadow.png')]:
             if machine.get(key):
                 assets['graphics/machines/' + name + suffix] = base64.b64decode(machine[key]['data'], validate=True)
     # One category per recipe gives each new machine exactly its selected list.
@@ -265,9 +441,10 @@ end''')
                                'local category = ' + lua(category),
                                'data:extend({{type="recipe-category", name=category}})',
                                'local custom = ' + lua(custom_names),
+                               'local category_machines = ' + lua({n: {c: True for c in m.get('categories', [])} for n, m in machines.items()}),
                                'for _, kind in ipairs({"assembling-machine", "furnace", "character", "rocket-silo"}) do',
                                '  for entity_name, entity in pairs(data.raw[kind] or {}) do',
-                               '    if not custom[entity_name] then',
+                               '    if not custom[entity_name] or (category_machines[entity_name] and category_machines[entity_name][old]) then',
                                '      local compatible = false',
                                '      for _, value in pairs(entity.crafting_categories or {}) do if value == old then compatible = true end end',
                                '      if compatible then',

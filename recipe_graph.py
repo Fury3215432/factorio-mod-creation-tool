@@ -29,11 +29,22 @@ def draw_recipes(tab):
         body = max(sum(slots), len(recipe.results) * 120, 260)
         return dict(recipe=recipe, path=path, name=name, children=children, slots=slots, height=body + 100, body=body)
 
-    root_name = tab.loaded_name or tab.name.get()
-    root = build(tab.recipe, (), root_name, {root_name})
+    direct = getattr(tab, 'direct_roots', None)
+    if direct is not None:
+        roots = []
+        for path, name in direct.items():
+            if name not in app.catalog.recipes:
+                continue
+            recipe = app.project.recipe(name) if name in app.project.data['recipes'] else Recipe(name, app.catalog.recipes[name])
+            roots.append(build(recipe, path, name, {name}))
+            active[path] = dict(name=name, key=tab.direct_key)
+    else:
+        root_name = tab.loaded_name or tab.name.get()
+        roots = [build(tab.recipe, (), root_name, {root_name})]
     tab.expanded_recipes = active
     max_depth = max((len(path) for path in active), default=0)
-    width, height = (max_depth + 1) * 1040, max(460, root['height'])
+    width = max(1, max_depth + (0 if direct is not None else 1)) * 1040
+    height = max(460, sum(root['height'] + 40 for root in roots))
     tab.graph_width = width
     canvas.delete('all')
     tab.flow_images = []
@@ -52,12 +63,12 @@ def draw_recipes(tab):
             canvas.create_text(x + 40, cy, text='◈', fill=GOLD, font=('Segoe UI', 28), tags=tag)
         canvas.create_text(x + 78, cy - 19, text=value['name'].replace('-', ' '), width=175, anchor='w', fill=TEXT, font=('Segoe UI', 10, 'bold'), tags=tag)
         amount = value.get('amount', f"{value.get('amount_min', '?')}–{value.get('amount_max', '?')}")
-        probability = f" · {value['probability']:g} chance" if 'probability' in value else ''
+        probability = f" · {value['probability'] * 100:g}% chance" if 'probability' in value else ''
         canvas.create_text(x + 78, cy + 18, text=f'× {amount}{probability}', anchor='w', fill=GOLD, font=('Segoe UI', 11), tags=tag)
         if not path:
             canvas.tag_bind(tag, select_event(tab), lambda e, s=side, i=index: tab.edit(s, i))
         else:
-            canvas.tag_bind(tag, select_event(tab), lambda e, p=path: tab.edit_expanded_recipe(p))
+            canvas.tag_bind(tag, select_event(tab), lambda e, p=path, s=side, i=index: tab.edit(s, i, p))
         return x, cy, x + 260
 
     def draw(group, y):
@@ -76,9 +87,9 @@ def draw_recipes(tab):
         source = recipe.original.get('normal', recipe.original)
         seconds = tab.seconds.get() if not path else app.project.data['recipes'].get(group['name'], {}).get('seconds', source.get('energy_required', .5))
         canvas.create_text(x + 520, cy, text='CRAFT\n' + str(seconds) + ' seconds', fill=TEXT, font=('Segoe UI', 12), justify='center', tags=craft_tag)
+        canvas.tag_bind(craft_tag, select_event(tab), lambda e, p=path, t=craft_tag: tab.edit_crafting_time(p, t))
         if path:
-            for tag in (craft_tag, title_tag):
-                canvas.tag_bind(tag, select_event(tab), lambda e, p=path: tab.edit_expanded_recipe(p))
+            canvas.tag_bind(title_tag, select_event(tab), lambda e, p=path: tab.edit_expanded_recipe(p))
         start = y + 80 + (group['body'] - sum(group['slots'])) / 2
         for index, (entry, slot) in enumerate(zip(recipe.ingredients, group['slots'])):
             iy = start + slot / 2
@@ -99,7 +110,10 @@ def draw_recipes(tab):
             canvas.create_line(x + 596, cy, x + 640, cy, x + 640, ry, x + 690, ry, fill=color, width=2, arrow='last')
         return products
 
-    draw(root, 0)
+    y = 0
+    for root in roots:
+        draw(root, y)
+        y += root['height'] + 40
     for x1, y1, x2, y2 in links:
         canvas.create_line(x1, y1, (x1 + x2) / 2, y1, (x1 + x2) / 2, y2, x2, y2, fill='#7cc6db', width=3, arrow='last', tags='recipe-link')
     canvas.tag_lower('recipe-link')

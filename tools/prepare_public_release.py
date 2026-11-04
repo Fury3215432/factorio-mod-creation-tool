@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MODULES = ('app.py', 'bulk_items.py', 'bulk_science.py', 'controls.py', 'core.py', 'creations_ui.py',
            'delete_items.py', 'editors.py', 'equations.py', 'flow.py', 'installation.py', 'machine_geometry.py',
            'machine_model.py', 'machine_ui.py', 'ore_model.py', 'pending_ui.py', 'project.py', 'recipe_graph.py',
-           'recipe_unlocks.py', 'replace_ingredient.py', 'technology.py', 'ui.py')
+           'recipe_unlocks.py', 'replace_ingredient.py', 'sprite_sheet_editor.py', 'sprite_shadows.py', 'sprite_shading.py', 'technology.py', 'ui.py')
 DOCUMENTS = ('README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md')
 LAUNCHERS = ('Launch Factorio Mod Creation Tool.bat',)
 PRIVATE_PARTS = {'.cache', '.studio', '__pycache__', 'output', '.env', '.venv', 'venv', 'node_modules'}
@@ -98,7 +98,10 @@ def prepare(destination):
             raise ValueError('Missing allowed source file: ' + name)
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source.read_bytes())
+        data = source.read_bytes()
+        if source.suffix in TEXT_SUFFIXES or source.name in ('.gitignore', 'CODEOWNERS'):
+            data = data.replace(b'\r\n', b'\n')
+        target.write_bytes(data)
     for name in ('app-icon.png', 'default-item-icon.png'):
         target = destination / 'assets' / name
         target.parent.mkdir(parents=True, exist_ok=True)

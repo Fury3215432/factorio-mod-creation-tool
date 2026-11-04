@@ -198,6 +198,10 @@ class Recipe:
                         raise ValueError('Quantities must be positive finite numbers.')
                 if e['type'] == 'item' and any(float(e[k]) != int(float(e[k])) for k in ('amount', 'amount_min', 'amount_max') if k in e):
                     raise ValueError('Item quantities must be whole numbers.')
+        for result in self.results:
+            probability = float(result.get('probability', 1))
+            if not math.isfinite(probability) or not 0 <= probability <= 1:
+                raise ValueError('Result probability must be between 0 and 1.')
         # Clone the live source in the target mod: preserves icons, categories,
         # machine restrictions and future Factorio properties without serializing them.
         q = lua(self.name)
@@ -224,6 +228,45 @@ class Recipe:
             out.insert(-2, 'recipe.category = ' + lua(category))
             out.insert(-2, 'recipe.categories = nil')
         return '\n'.join(out)
+
+
+def prepare_mod_test(project, catalog, installation, source_mods, workspace):
+    """Export into an isolated, persistent GUI test profile."""
+    root, workspace, source_mods = Path(installation), Path(workspace), Path(source_mods)
+    exe = root / 'bin' / 'x64' / 'factorio.exe'
+    if not exe.is_file():
+        raise ValueError('The Factorio executable could not be found. Load a valid installation first.')
+    workspace.mkdir(parents=True, exist_ok=True)
+    mods = workspace / 'mods'
+    mods.mkdir(exist_ok=True)
+    names = {'base'}
+    for source, info in loaded_mods(source_mods):
+        destination = mods / source.name
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+        names.add(info['name'])
+    settings = source_mods / 'mod-settings.dat'
+    if settings.is_file():
+        shutil.copy2(settings, mods / settings.name)
+    name, suffix = 'recipe-studio-playtest', 2
+    while name in names:
+        name = 'recipe-studio-playtest-' + str(suffix)
+        suffix += 1
+    project.export(mods / (name + '_1.0.0.zip'), catalog, root, source_mods, mod_name=name)
+    names.add(name)
+    (mods / 'mod-list.json').write_text(json.dumps({'mods': [{'name': name, 'enabled': True} for name in sorted(names)]}), encoding='utf-8')
+    config = workspace / 'config.ini'
+    config.write_text('[path]\nread-data=' + (root / 'data').as_posix() + '\nwrite-data=' + workspace.as_posix() + '\n', encoding='utf-8')
+    return [str(exe), '--config', str(config), '--mod-directory', str(mods)]
+
+
+def launch_mod_test(project, catalog, installation, source_mods, workspace):
+    command = prepare_mod_test(project, catalog, installation, source_mods, workspace)
+    with (Path(workspace) / 'launch.log').open('w', encoding='utf-8') as log:
+        return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 
 def load_game(installation, selected_mods, workspace, track_mod_content=False):
@@ -266,6 +309,7 @@ def load_game(installation, selected_mods, workspace, track_mod_content=False):
     catalog = Catalog(json.loads(dump.read_text(encoding='utf-8')))
     if track_mod_content and selected_mods:
         baseline, _, _ = load_game(root, [], workspace / 'base-reference')
+        catalog.vanilla_unlock_baseline = {'technology': baseline.raw.get('technology', {}), 'recipe': baseline.raw.get('recipe', {})}
         catalog.loaded_items = {key for key, proto in catalog.items.items() if baseline.items.get(key) != proto}
         catalog.loaded_recipes = {name for name, proto in catalog.recipes.items() if baseline.recipes.get(name) != proto}
     return catalog, root, mods

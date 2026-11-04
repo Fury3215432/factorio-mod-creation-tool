@@ -52,8 +52,10 @@ class CascadeItemDeletion(unittest.TestCase):
             tab_count = len(app.tabs.tabs())
             with patch.object(pending.items, 'identify_region', return_value='cell'), patch.object(pending.items, 'identify_row', return_value='test_component'), patch('pending_ui.tk.Menu.tk_popup'):
                 pending.context(SimpleNamespace(widget=pending.items, x=5, y=5, x_root=0, y_root=0))
-            self.assertEqual(pending.context_menu.entrycget(3, 'label'), 'Delete item and recipes containing it')
-            pending.context_menu.invoke(3)
+            actions={pending.context_menu.entrycget(i,'label'):i for i in range(pending.context_menu.index('end')+1)
+                     if pending.context_menu.type(i)=='command'}
+            self.assertIn('Delete item and recipes containing it',actions)
+            pending.context_menu.invoke(actions['Delete item and recipes containing it'])
             self.assertFalse(errors.called, errors.call_args_list)
             self.assertNotIn(('item', 'test_component'), app.catalog.items)
             for name in ('produce-component', 'consume-component'):

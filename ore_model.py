@@ -1,4 +1,6 @@
 """Solid ore resources and their map-generation controls."""
+import base64
+from pathlib import Path
 import copy
 import re
 
@@ -17,14 +19,16 @@ def resource(name, item, raw, icon):
     identifier(name)
     if name in raw.get('resource', {}):
         raise ValueError('That resource ID already exists in the loaded game.')
-    source = item.get('ore_template', 'iron-ore')
-    if source not in templates(raw):
-        raise ValueError('Choose a loaded solid ore template.')
+    source = item.get('ore_template')
+    if source and source not in templates(raw):
+        raise ValueError('Missing original ore template: ' + source)
     color = item.get('ore_color', '#ffffff')
     if not re.fullmatch(r'#[0-9a-fA-F]{6}', color):
         raise ValueError('Ore color must be a hex color, such as #bb66ff.')
     tint = dict(zip(('r', 'g', 'b'), [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]))
-    proto = copy.deepcopy(raw['resource'][source])
+    proto = copy.deepcopy(raw['resource'][source]) if source else {
+        'type': 'resource', 'flags': ['placeable-neutral'],
+        'collision_box': [[-.1, -.1], [.1, .1]], 'selection_box': [[-.5, -.5], [.5, .5]]}
     for field in ('icons', 'autoplace', 'factoriopedia_simulation', 'infinite', 'minimum', 'normal', 'infinite_depletion_amount'):
         proto.pop(field, None)
     proto.update(name=name, localised_name=item['title'], localised_description=item.get('description', ''),
@@ -32,9 +36,63 @@ def resource(name, item, raw, icon):
                  minable={'mining_time': positive(item.get('mining_time', 1), 'Mining seconds'),
                           'results': [{'type': 'item', 'name': name, 'amount': positive(item.get('mining_amount', 1), 'Mining yield', True)}]},
                  map_color=tint, mining_visualisation_tint=tint)
+    if not source or item.get('ore_graphics'):
+        asset = item.get('ore_graphics') or item.get('icon')
+        if not asset:
+            from project import default_icon_asset
+            asset = default_icon_asset()
+        full_width, full_height = asset.get('width', asset.get('size')), asset.get('height', asset.get('size'))
+        counts = item.get('ore_stage_counts', [0])
+        if not counts or any(not isinstance(n, int) or n < 0 for n in counts) or counts != sorted(set(counts), reverse=True):
+            raise ValueError('Ore stage amounts must be unique, descending whole numbers, ending with 0.')
+        if counts[-1] != 0:
+            raise ValueError('The final ore stage amount must be 0.')
+        variations = positive(item.get('ore_variations', 1), 'Ore variations', True)
+        stages = len(counts)
+        width = positive(item.get('ore_frame_width') or full_width / stages, 'Ore frame width', True)
+        height = positive(item.get('ore_frame_height') or full_height / variations, 'Ore frame height', True)
+        if width * stages > full_width or height * variations > full_height:
+            raise ValueError('Ore frames do not fit the graphics PNG: depletion stages run across columns and variations down rows.')
+        scale = positive(item.get('ore_graphics_scale', 1), 'Ore graphics scale')
+        proto['stage_counts'] = counts
+        proto['stages'] = {'sheet': {'filename': '__RECIPE_STUDIO_MOD__/graphics/ores/' + name + '.png',
+                          'width': width, 'height': height, 'frame_count': stages, 'variation_count': variations, 'scale': 32 / width * scale}}
     transform_graphics(proto['stages'], 1, list(tint.values()) + [1])
+    volume = float(item.get('ore_sound_volume', .7))
+    if not 0 <= volume <= 1:
+        raise ValueError('Ore sound volume must be between 0 and 1.')
+    for sound in ('mining', 'mined', 'walking'):
+        asset = item.get('ore_' + sound + '_sound')
+        if asset:
+            proto[sound + '_sound'] = {'filename': '__RECIPE_STUDIO_MOD__/sound/ores/' + name + '-' + sound + asset['extension'], 'volume': volume}
+
     positive(item.get('ore_density', 10), 'Ore density')
     return proto
+
+
+def sound_asset(path):
+    path = Path(path)
+    data = path.read_bytes()
+    extension = path.suffix.lower()
+    if len(data) > 20 * 1024 * 1024 or not ((extension == '.ogg' and data.startswith(b'OggS')) or
+        (extension == '.wav' and data.startswith(b'RIFF') and data[8:12] == b'WAVE')):
+        raise ValueError('Choose an OGG or WAV audio file, up to 20 MB.')
+    return {'data': base64.b64encode(data).decode('ascii'), 'extension': extension}
+
+
+def resource_assets(name, item):
+    result = {}
+    if not item.get('ore_template') or item.get('ore_graphics'):
+        from project import default_icon_asset
+        asset = item.get('ore_graphics') or item.get('icon') or default_icon_asset()
+        result['graphics/ores/' + name + '.png'] = base64.b64decode(asset['data'], validate=True)
+    for sound in ('mining', 'mined', 'walking'):
+        asset = item.get('ore_' + sound + '_sound')
+        if asset:
+            if asset['extension'] not in ('.ogg', '.wav'):
+                raise ValueError('Unsupported ore sound format.')
+            result['sound/ores/' + name + '-' + sound + asset['extension']] = base64.b64decode(asset['data'], validate=True)
+    return result
 
 
 def control(name, item):

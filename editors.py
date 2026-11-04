@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk, colorchooser
 import zipfile
 
 from core import Catalog, loaded_mods, mod_archive_name
-from project import identifier, png_asset, positive, default_icon_asset, is_finished_product
+from project import identifier, png_asset, positive, default_icon_asset, is_finished_product, fuel_energy
 from ui import HELP, help_label, scroll_form, entry_undo
 from controls import sequence, BUTTONS
 
@@ -31,7 +31,7 @@ def field(parent, label, value='', width=50):
     return var, row, entry
 
 
-def item_dialog(tab, item=None, as_ingredient=False):
+def item_dialog(tab, item=None, as_ingredient=False, as_result=False):
     app = tab.app
     item = copy.deepcopy(item or {})
     dialog = tk.Toplevel(app)
@@ -53,11 +53,17 @@ def item_dialog(tab, item=None, as_ingredient=False):
     description, _, _ = field(body, 'Description', item.get('description', ''))
     finished = tk.BooleanVar(value=is_finished_product(item))
     ttk.Checkbutton(body, text='Mark as finished product', variable=finished).pack(anchor='w', padx=16, pady=4)
-    help_label(body, 'Finished products are excluded from the unused-ingredient list in Pending requirements. Missing icons and crafting recipes are still tracked.', wraplength=610)
+    help_label(body, 'Finished products are excluded from the unused-ingredient list in Suggested actions. Missing icons and crafting recipes are still tracked.', wraplength=610)
     stack, stack_row, _ = field(body, 'Stack size', item.get('stack_size', 100))
     stack_help = body.winfo_children()[-1]
     temperature, temp_row, _ = field(body, 'Default temperature', item.get('default_temperature', 25))
     temp_help = body.winfo_children()[-1]
+    fuel, _, _ = field(body, 'Fuel value', item.get('fuel_value', ''))
+    help_label(body, 'Energy released per item (or fluid unit), such as 4MJ or 500kJ. Leave blank to make it non-fuel.', wraplength=610)
+    fuel_category, fuel_row, fuel_entry = field(body, 'Fuel category', item.get('fuel_category', (item.get('fuel_categories') or ['chemical'])[0]))
+    fuel_entry.destroy()
+    ttk.Combobox(fuel_row, textvariable=fuel_category, values=sorted(app.catalog.raw.get('fuel-category', {})), state='readonly').pack(side='left', fill='x', expand=True)
+    help_label(body, 'Determines which burners accept this solid fuel. Chemical is used by ordinary burners; fluids do not use a fuel category.', wraplength=610)
     quantity, quantity_row, _ = field(body, 'Recipe result amount', item.get('default_amount', 1))
     subgroup, row, entry = field(body, 'Inventory subgroup', item.get('subgroup', 'intermediate-product'))
     entry.destroy()
@@ -65,10 +71,34 @@ def item_dialog(tab, item=None, as_ingredient=False):
     path, row, entry = field(body, 'PNG file', item.get('icon_path', ''))
     ttk.Button(row, text='Browse…', command=lambda: choose_png(path)).pack(side='right', padx=4)
     ore_frame = ttk.Frame(body)
-    from ore_model import templates
-    ore_source, ore_row, ore_entry = field(ore_frame, 'Ore template', item.get('ore_template', 'iron-ore'))
-    ore_entry.destroy()
-    ttk.Combobox(ore_row, textvariable=ore_source, values=templates(app.base_raw), state='readonly').pack(side='left', fill='x', expand=True)
+    ore_graphics, ore_graphics_row, _ = field(ore_frame, 'Ore graphics PNG', item.get('ore_graphics_path', ''))
+    def choose_ore_graphics():
+        chosen = filedialog.askopenfilename(parent=dialog, title='Choose ore ground PNG or sprite sheet', filetypes=[('PNG graphics', '*.png')])
+        if chosen:
+            ore_graphics.set(chosen)
+    ttk.Button(ore_graphics_row, text='Browse…', command=choose_ore_graphics).pack(side='right')
+    help_label(ore_frame, 'Ground graphics for the mineable ore. Use a transparent PNG or sheet. If blank, the item icon is used as the ground graphic; no ore template is needed.', wraplength=610)
+    ore_frame_width, _, _ = field(ore_frame, 'Ore frame width', item.get('ore_frame_width', 0))
+    ore_frame_height, _, _ = field(ore_frame, 'Ore frame height', item.get('ore_frame_height', 0))
+    help_label(ore_frame, 'Pixel dimensions of each ground sprite. Zero calculates dimensions from the sheet and stage/variation counts.', wraplength=610)
+    ore_stages, _, _ = field(ore_frame, 'Ore stage amounts', ', '.join(map(str, item.get('ore_stage_counts', [0]))))
+    help_label(ore_frame, 'Descending resource amounts for depletion graphics, ending at 0. Example: 1000, 100, 0 needs 3 sprite columns. A single 0 uses a static sprite.', wraplength=610)
+    ore_variations, _, _ = field(ore_frame, 'Ore variations', item.get('ore_variations', 1))
+    help_label(ore_frame, 'Number of random visual variations arranged down the PNG rows. Depletion stages go across columns.', wraplength=610)
+    ore_scale, _, _ = field(ore_frame, 'Ore graphics scale', item.get('ore_graphics_scale', 1))
+    help_label(ore_frame, 'Visual size multiplier: 1 fits a frame to one tile width. This does not change mining yield or collision.', wraplength=610)
+    ore_sounds = {}
+    for sound, label in [('mining', 'Mining sound'), ('mined', 'Mined sound'), ('walking', 'Walking sound')]:
+        variable, sound_row, _ = field(ore_frame, label, item.get('ore_' + sound + '_sound_path', ''))
+        ore_sounds[sound] = variable
+        def choose_sound(variable=variable):
+            chosen = filedialog.askopenfilename(parent=dialog, title='Choose ore sound', filetypes=[('Audio', '*.ogg *.wav')])
+            if chosen:
+                variable.set(chosen)
+        ttk.Button(sound_row, text='Browse…', command=choose_sound).pack(side='right')
+        help_label(ore_frame, 'Optional OGG/WAV for this ore. Mining plays during manual mining; mined plays on completion; walking plays when walking over it. Files are embedded in the project and export.', wraplength=610)
+    ore_volume, _, _ = field(ore_frame, 'Ore sound volume', item.get('ore_sound_volume', .7))
+    help_label(ore_frame, 'Volume for custom ore sounds, from 0 (silent) to 1 (full volume).', wraplength=610)
     mining_time, _, _ = field(ore_frame, 'Mining seconds', item.get('mining_time', 1))
     mining_amount, _, _ = field(ore_frame, 'Mining yield', item.get('mining_amount', 1))
     ore_color, color_row, _ = field(ore_frame, 'Ore color', item.get('ore_color', '#ffffff'))
@@ -84,7 +114,7 @@ def item_dialog(tab, item=None, as_ingredient=False):
     help_label(ore_frame, 'Adds map-generation controls and ore patches in new maps or newly generated terrain; existing explored terrain is unchanged.', wraplength=610)
     ttk.Checkbutton(ore_frame, text='Include a starting-area patch', variable=ore_starting).pack(anchor='w', padx=16, pady=4)
     help_label(ore_frame, 'Allows patches near spawn when automatic map generation is enabled.', wraplength=610)
-    ttk.Label(body, text=('PNG is optional. Leave it blank to keep the loaded item’s original icon.\n' if item.get('operation') == 'edit' else 'PNG is optional. Without one, the checkerboard icon is used and the item appears in Pending requirements.\n') + 'The item is saved immediately and can be selected as an ingredient or result in any flowchart.', wraplength=620, padding=16).pack(anchor='w')
+    ttk.Label(body, text=('PNG is optional. Leave it blank to keep the loaded item’s original icon.\n' if item.get('operation') == 'edit' else 'PNG is optional. Without one, the checkerboard icon is used and the item appears in Suggested actions.\n') + 'The item is saved immediately and can be selected as an ingredient or result in any flowchart.', wraplength=620, padding=16).pack(anchor='w')
     def update_type(*_):
         if kind.get() == 'science pack' and item.get('kind') != 'science pack':
             finished.set(True)
@@ -126,6 +156,13 @@ def item_dialog(tab, item=None, as_ingredient=False):
                      'stack_size': positive(stack.get(), 'Stack size', True) if kind.get() != 'fluid' else 100,
                      'subgroup': subgroup.get(), 'icon': icon, 'icon_path': icon_path,
                      'icon_is_default': bool(icon and icon['data'] == default_icon_asset()['data'])}
+            draft['fuel_value'] = fuel_energy(fuel.get())
+            if draft['fuel_value'] and kind.get() != 'fluid':
+                if fuel_category.get() not in app.catalog.raw.get('fuel-category', {}):
+                    raise ValueError('Choose a loaded fuel category.')
+                draft['fuel_category'] = fuel_category.get()
+                if item.get('fuel_categories') or 'fuel_categories' in app.catalog.raw.get('item', {}).get('coal', {}):
+                    draft['fuel_categories'] = [fuel_category.get()]
             if item.get('operation') == 'edit':
                 if item_id != item['name'] or kind.get() != item.get('kind', 'item'):
                     raise ValueError('Loaded items must keep their original ID and type.')
@@ -140,10 +177,29 @@ def item_dialog(tab, item=None, as_ingredient=False):
                     if key in item:
                         draft[key] = item[key]
             if kind.get() == 'ore':
-                draft.update(ore_template=ore_source.get(), mining_time=positive(mining_time.get(), 'Mining seconds'),
+                draft.update(ore_template=None, mining_time=positive(mining_time.get(), 'Mining seconds'),
                              mining_amount=positive(mining_amount.get(), 'Mining yield', True), ore_color=ore_color.get(),
                              ore_density=positive(ore_density.get(), 'Ore density'), ore_autoplace=ore_autoplace.get(),
                              ore_starting_area=ore_starting.get())
+                from machine_model import sprite_asset
+                from ore_model import sound_asset
+                graphics_path = ore_graphics.get().strip()
+                draft['ore_graphics'] = (item.get('ore_graphics') if graphics_path == item.get('ore_graphics_path') else sprite_asset(graphics_path)) if graphics_path else None
+                draft['ore_graphics_path'] = graphics_path
+                draft['ore_frame_width'] = int(ore_frame_width.get())
+                draft['ore_frame_height'] = int(ore_frame_height.get())
+                if min(draft['ore_frame_width'], draft['ore_frame_height']) < 0:
+                    raise ValueError('Ore frame dimensions cannot be negative.')
+                draft['ore_stage_counts'] = [int(value.strip()) for value in ore_stages.get().split(',')]
+                draft['ore_variations'] = positive(ore_variations.get(), 'Ore variations', True)
+                draft['ore_graphics_scale'] = positive(ore_scale.get(), 'Ore graphics scale')
+                draft['ore_sound_volume'] = float(ore_volume.get())
+                for sound, variable in ore_sounds.items():
+                    sound_path = variable.get().strip()
+                    key = 'ore_' + sound + '_sound'
+                    draft[key] = (item.get(key) if sound_path == item.get(key + '_path') else sound_asset(sound_path)) if sound_path else None
+                    draft[key + '_path'] = sound_path
+
             draft['created_at'] = item.get('created_at', time_ns())
             amount = positive(quantity.get(), 'Result amount', kind.get() != 'fluid')
             draft['default_amount'] = amount
@@ -184,10 +240,12 @@ def item_dialog(tab, item=None, as_ingredient=False):
             for widget, _, state in related:
                 widget.restore(state)
             app.refresh_catalog()
-            if as_ingredient:
+            if as_ingredient or as_result:
                 tracking = tab.tracking
                 tab.tracking = False
-                tab.add_entry('ingredients', ('fluid' if draft['kind'] == 'fluid' else 'item', item_id), amount)
+                tab.add_entry('results' if as_result else 'ingredients', ('fluid' if draft['kind'] == 'fluid' else 'item', item_id), amount)
+                if as_result and tab.auto_name and not tab.loaded_name and not tab.saved_key:
+                    tab.name.set(tab.recipe.results[0]['name'] + '_recipe')
                 tab.tracking = tracking
                 tab.dirty = True
                 tab.update_mode()
@@ -284,6 +342,83 @@ def select_names(app, title, values, callback):
 from technology import TechTab
 
 
+def unlock_icon_picker(owner, recipes, callback):
+    app = owner.app
+    from core import entries
+    from flow import prototype_image
+    candidates = {}
+    for name in recipes:
+        recipe = app.catalog.recipes.get(name)
+        if recipe is None:
+            continue
+        candidates[('recipe', name)] = recipe
+        for product in entries(recipe, 'results'):
+            key = product['type'], product['name']
+            candidates[key] = app.catalog.items.get(key, {})
+    dialog = tk.Toplevel(app)
+    dialog.title('Choose technology icon from unlocks')
+    dialog.transient(app)
+    dialog.geometry('680x500')
+    help_label(dialog, 'Choose an icon from an unlocked recipe or one of its resulting items/fluids. The selected PNG is embedded in the project and exported mod.', wraplength=640)
+    holder = ttk.Frame(dialog, padding=12)
+    holder.pack(fill='both', expand=True)
+    listing = ttk.Treeview(holder, columns=('kind',), show='tree headings', selectmode='browse', height=9)
+    ttk.Style(dialog).configure('UnlockIcons.Treeview', rowheight=42)
+    listing.configure(style='UnlockIcons.Treeview')
+    listing.heading('#0', text='Icon / ID')
+    listing.heading('kind', text='Source')
+    listing.column('#0', width=420)
+    listing.column('kind', width=120)
+    scrollbar = ttk.Scrollbar(holder, orient='vertical', command=listing.yview)
+    listing.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side='right', fill='y')
+    listing.pack(fill='both', expand=True)
+    images, choices = [], {}
+    def picture(key, size):
+        kind, name = key
+        if kind != 'recipe':
+            return app.icon(key, size=size)
+        recipe = candidates[key]
+        image = prototype_image(app, recipe, size)
+        if not image:
+            products = entries(recipe, 'results')
+            if products:
+                image = app.icon((products[0]['type'], products[0]['name']), size=size)
+        return image
+    for key in candidates:
+        image = picture(key, 36)
+        if not image:
+            continue
+        row_id = str(len(choices))
+        choices[row_id] = key
+        images.append(image)
+        listing.insert('', 'end', iid=row_id, text=key[1], values=(key[0],), image=image)
+    listing.images = images
+    if choices:
+        listing.selection_set(next(iter(choices)))
+    else:
+        ttk.Label(dialog, text='Add recipe unlocks with available icons first.', padding=12).pack(anchor='w')
+    def choose(*_):
+        selected = listing.selection()
+        if not selected:
+            return
+        key = choices[selected[0]]
+        image = picture(key, 64)
+        if image is None:
+            return
+        import base64
+        data = image.tk.call(str(image), 'data', '-format', 'png')
+        if isinstance(data, str):
+            data = data.encode('latin1')
+        asset = {'data': base64.b64encode(data).decode('ascii'), 'size': image.width()}
+        callback(asset, '@unlock:' + key[0] + ':' + key[1])
+        dialog.destroy()
+    ttk.Button(dialog, text='Use selected icon', command=choose).pack(anchor='e', padx=12, pady=12)
+    listing.bind('<Double-Button-1>', choose)
+    listing.bind(sequence(app.controls['picker_accept']), choose)
+    return dialog
+
+
 def technology_dialog(tab, name=None, force=False):
     if not force and not tab.confirm_switch():
         return
@@ -291,6 +426,7 @@ def technology_dialog(tab, name=None, force=False):
     tab.editor_tracking = False
     existing = copy.deepcopy(app.catalog.raw.get('technology', {}).get(name, {}))
     saved = app.project.data['technologies'].get(name, {})
+    tab.editor_icon_choices = {saved.get('icon_path'): copy.deepcopy(saved['icon'])} if saved.get('icon') and saved.get('icon_path', '').startswith('@unlock:') else {}
     prototype = existing or {'type': 'technology', 'name': '', 'icon': '__base__/graphics/technology/automation-1.png', 'icon_size': 256,
                              'prerequisites': [], 'effects': [], 'unit': {'count': 10, 'time': 30, 'ingredients': [['automation-science-pack', 1]]}}
     for child in tab.editor_host.winfo_children():
@@ -368,10 +504,120 @@ def technology_dialog(tab, name=None, force=False):
         append_names(science, [n + ':1' for n in names if n not in current])
     ttk.Button(row, text='Choose…', command=lambda: select_names(app, 'Select science packs', app.catalog.raw.get('tool', {}), add_packs)).pack(side='right', padx=4)
     ttk.Label(main, text='Science format: automation-science-pack:1,\nlogistic-science-pack:1', padding=(16, 0, 16, 6)).pack(anchor='w')
-    unlocks, row, _ = field(main, 'Recipe unlocks', ', '.join(e['recipe'] for e in prototype.get('effects', []) if e.get('type') == 'unlock-recipe'))
-    ttk.Button(row, text='Choose…', command=lambda: select_names(app, 'Select recipe unlocks', app.catalog.recipes, lambda names: append_names(unlocks, names))).pack(side='right', padx=4)
+    unlocks = tk.StringVar(value=', '.join(e['recipe'] for e in prototype.get('effects', []) if e.get('type') == 'unlock-recipe'))
+    row = ttk.Frame(main)
+    row.pack(fill='x', padx=16, pady=4)
+    ttk.Label(row, text='Recipe unlocks').pack(side='left')
+    def add_recipe_unlocks(names):
+        invalid = [recipe for recipe in names if recipe not in app.catalog.recipes]
+        if invalid:
+            messagebox.showerror('Recipe IDs required', 'Technologies unlock recipes, not item IDs. Invalid entries: ' + ', '.join(invalid), parent=tab)
+            return
+        append_names(unlocks, names)
+    ttk.Button(row, text='Add recipes…', command=lambda: select_names(app, 'Select recipe IDs to unlock', app.catalog.recipes, add_recipe_unlocks)).pack(side='right', padx=4)
+    unlock_holder = ttk.Frame(main)
+    unlock_holder.pack(fill='both', padx=16, pady=4)
+    ttk.Style(tab).configure('RecipeUnlocks.Treeview', rowheight=32)
+    unlock_list = ttk.Treeview(unlock_holder, columns=('products',), show='tree headings', height=6, selectmode='extended', style='RecipeUnlocks.Treeview')
+    tab.unlock_list = unlock_list
+    unlock_list.heading('#0', text='Recipe')
+    unlock_list.column('#0', width=190, minwidth=100)
+    unlock_list.heading('products', text='Products')
+    unlock_list.column('products', width=145, minwidth=80)
+    unlock_scroll = ttk.Scrollbar(unlock_holder, orient='vertical', command=unlock_list.yview)
+    unlock_list.configure(yscrollcommand=unlock_scroll.set)
+    unlock_scroll.pack(side='right', fill='y')
+    unlock_list.pack(fill='both', expand=True)
+    def refresh_unlock_list(*_):
+        from core import entries
+        from flow import prototype_image
+        selected = unlock_list.selection()
+        unlock_list.delete(*unlock_list.get_children())
+        unlock_list.images = []
+        for recipe_name in dict.fromkeys(split_names(unlocks.get())):
+            recipe = app.catalog.recipes.get(recipe_name, {})
+            products = entries(recipe, 'results')
+            image = prototype_image(app, recipe, 24)
+            if not image and products:
+                image = app.icon((products[0]['type'], products[0]['name']), size=24)
+            options = {}
+            if image:
+                unlock_list.images.append(image)
+                options['image'] = image
+            unlock_list.insert('', 'end', iid=recipe_name, text=recipe_name,
+                               values=(', '.join(product['name'] for product in products) if recipe_name in app.catalog.recipes else 'Invalid: not a recipe ID — delete this unlock',), **options)
+        retained = [recipe for recipe in selected if unlock_list.exists(recipe)]
+        if retained:
+            unlock_list.selection_set(*retained)
+    def remove_unlocks(*_):
+        selected = set(unlock_list.selection())
+        if selected:
+            before_state = tab.snapshot()
+            tab.editor_tracking = False
+            unlocks.set(', '.join(recipe for recipe in split_names(unlocks.get()) if recipe not in selected))
+            tab.editor_tracking = True
+            tab.dirty = True
+            app.record_undo('Remove technology recipe unlocks', tab, before_state)
+            tab.last_editor_state = tab.snapshot()
+        return 'break'
+    ttk.Button(main, text='Delete selected unlocks', command=remove_unlocks).pack(anchor='w', padx=16, pady=4)
+    unlock_list.bind('<Delete>', remove_unlocks)
+    help_label(main, 'Recipes unlocked by this technology, shown with their icons and products. Add recipes accepts recipe IDs only; Ctrl/Shift-select rows and Delete selected unlocks removes them from this technology. Save technology to apply.', wraplength=335)
+    def unlock_context(event):
+        recipe = unlock_list.identify_row(event.y)
+        if not recipe:
+            return
+        if recipe not in unlock_list.selection():
+            unlock_list.selection_set(recipe)
+        if hasattr(unlock_list, 'context_menu'):
+            unlock_list.context_menu.destroy()
+        unlock_list.context_menu = tk.Menu(unlock_list, tearoff=False)
+        from creations_ui import rename_recipe
+        if recipe in app.catalog.recipes:
+            unlock_list.context_menu.add_command(label='Rename recipe', command=lambda: rename_recipe(tab, recipe))
+        unlock_list.context_menu.add_command(label='Delete selected unlocks', command=remove_unlocks)
+        unlock_list.context_menu.tk_popup(event.x_root, event.y_root)
+    unlock_list.bind('<Button-%d>' % BUTTONS[app.controls['context_button']], unlock_context)
+    unlock_trace = unlocks.trace_add('write', refresh_unlock_list)
+    def cleanup_unlock_list(event):
+        if event.widget is unlock_list:
+            unlocks.trace_remove('write', unlock_trace)
+    unlock_list.bind('<Destroy>', cleanup_unlock_list, add='+')
+    refresh_unlock_list()
+    def add_necessary_ingredients():
+        from recipe_unlocks import necessary_ingredient_recipes, choose_ingredient_recipe, IngredientChoiceCancelled
+        try:
+            roots = split_names(unlocks.get())
+            if not roots:
+                messagebox.showinfo('No recipe unlocks', 'Add at least one recipe unlock first.', parent=tab)
+                return
+            names = necessary_ingredient_recipes(app, roots, name, split_names(prerequisites.get()),
+                                                 chooser=lambda key, choices: choose_ingredient_recipe(tab, key, choices))
+            if names != roots:
+                before_state = tab.snapshot()
+                tab.editor_tracking = False
+                unlocks.set(', '.join(names))
+                tab.editor_tracking = True
+                tab.dirty = True
+                app.record_undo('Add necessary ingredients', tab, before_state)
+                tab.last_editor_state = tab.snapshot()
+        except IngredientChoiceCancelled:
+            return
+        except (ValueError, KeyError) as exc:
+            messagebox.showerror('Cannot add necessary ingredients', str(exc), parent=tab)
+    ttk.Button(main, text='Add necessary ingredients', command=add_necessary_ingredients).pack(anchor='w', padx=16, pady=4)
+    help_label(main, 'Adds direct ingredient recipes, then deeper ingredients only when every recipe using them is unlocked here. Recipes available from the start or through prerequisite technologies are excluded. Save technology to apply; Ctrl+Z restores the edit.', wraplength=335)
+
     png, row, _ = field(main, 'Custom icon PNG (optional)', saved.get('icon_path', ''))
     ttk.Button(row, text='Browse…', command=lambda: choose_png(png)).pack(side='right', padx=4)
+    def choose_unlock_icon():
+        def selected(asset, marker):
+            tab.editor_icon_choices[marker] = asset
+            png.set(marker)
+        return unlock_icon_picker(tab, split_names(unlocks.get()), selected)
+    ttk.Button(main, text='Choose icon from unlocks…', command=choose_unlock_icon).pack(anchor='w', padx=16, pady=4)
+    help_label(main, 'Use the PNG of an unlocked recipe or its resulting item/fluid as this technology’s icon.', wraplength=335)
+
     trigger = tk.BooleanVar(value=bool(prototype.get('research_trigger')))
     ttk.Checkbutton(main, text='Use research trigger (Advanced JSON)', variable=trigger).pack(anchor='w', padx=16, pady=8)
     ttk.Label(main, text='Leave PNG blank to keep the existing icon.\nOther effects and properties stay in Advanced JSON.\nAn unlock makes its recipe unavailable at the start.', padding=16, wraplength=335).pack(anchor='w')
@@ -434,11 +680,16 @@ def technology_dialog(tab, name=None, force=False):
                     research['count'] = positive(count.get(), 'Research count', True)
                 proto['unit'] = research
             asset = saved.get('icon')
-            if png.get().strip() and (not asset or png.get() != saved.get('icon_path')):
+            if png.get().startswith('@unlock:'):
+                asset = tab.editor_icon_choices.get(png.get())
+                if not asset:
+                    raise ValueError('Choose the unlock icon again.')
+            elif png.get().strip() and (not asset or png.get() != saved.get('icon_path')):
                 asset = png_asset(png.get())
-                tk.PhotoImage(data=asset['data'], master=dialog)
             if not png.get().strip():
                 asset = None
+            if asset:
+                tk.PhotoImage(data=asset['data'], master=dialog)
             app.project.validate_technology(proto, app.catalog, previous=name)
             if not asset and not proto.get('icon') and not proto.get('icons'):
                 raise ValueError('A technology needs an icon or a custom PNG.')
@@ -479,6 +730,9 @@ def technology_dialog(tab, name=None, force=False):
             return False
     tab.editor_save = save
     ttk.Button(footer, text='Save technology' if name else 'Create technology', command=save).pack(side='right')
+    if name:
+        from delete_items import delete_technology
+        ttk.Button(footer, text='Delete technology', command=lambda: delete_technology(tab, name)).pack(side='right', padx=6)
     ttk.Button(footer, text='Discard', command=lambda: technology_dialog(tab, name, force=True)).pack(side='left')
     def mark(*_):
         if not tab.editor_tracking:
@@ -514,3 +768,52 @@ def technology_dialog(tab, name=None, force=False):
 
 def split_names(value):
     return [n.strip() for n in value.split(',') if n.strip()]
+
+
+def category_dialog(tab):
+    app = tab.app
+    dialog = tk.Toplevel(app)
+    dialog.title('Create recipe category')
+    dialog.transient(app)
+    dialog.geometry('650x540')
+    name, _, entry = field(dialog, 'Category ID')
+    help_label(dialog, 'Unique internal ID used by recipes and compatible crafting machines. Use letters, numbers, underscores or hyphens.', wraplength=610)
+    ttk.Label(dialog, text='Compatible producers (optional)', padding=12).pack(anchor='w')
+    help_label(dialog, 'Ctrl-click or Shift-click to select producers that should accept this category. Other machine restrictions, such as fluid ports, still apply. You can also create a machine for its recipes later.', wraplength=610)
+    holder = ttk.Frame(dialog, padding=12)
+    holder.pack(fill='both', expand=True)
+    listing = tk.Listbox(holder, selectmode='extended', exportselection=False, bg= CARD, fg=TEXT, selectbackground='#45566c')
+    scrollbar = ttk.Scrollbar(holder, command=listing.yview)
+    listing.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side='right', fill='y')
+    listing.pack(fill='both', expand=True)
+    producers = [(kind, n) for kind in ('assembling-machine', 'furnace', 'rocket-silo', 'character') for n in sorted(app.base_raw.get(kind, {}))]
+    for kind, producer in producers:
+        listing.insert('end', producer + ' (' + kind + ')')
+    def create():
+        before = copy.deepcopy(app.project.data)
+        state = tab.snapshot()
+        try:
+            category = identifier(name.get().strip())
+            if category in app.catalog.raw.get('recipe-category', {}):
+                raise ValueError('That recipe category already exists.')
+            app.project.data['categories'][category] = {'producers': [list(producers[i]) for i in listing.curselection()]}
+            app.project.compile(Catalog(app.base_raw))
+            app.persist()
+        except (ValueError, OSError, KeyError) as exc:
+            app.project.data = before
+            messagebox.showerror('Cannot create category', str(exc), parent=dialog)
+            return
+        app.record_undo('Create recipe category', tab, state, before)
+        app.refresh_catalog()
+        tab.tracking = False
+        tab.category.set(category)
+        tab.tracking = True
+        tab.dirty = True
+        tab.update_mode()
+        tab.last_state = tab.snapshot()
+        dialog.destroy()
+    ttk.Button(dialog, text='Create category', command=create).pack(anchor='e', padx=12, pady=12)
+    dialog.bind(sequence(app.controls['dialog_dismiss']), lambda e: dialog.destroy())
+    entry.focus_set()
+    return dialog

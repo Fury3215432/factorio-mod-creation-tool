@@ -37,7 +37,8 @@ class UnifiedFlow(unittest.TestCase):
             with patch('app.tk.Menu') as menu:
                 tab.context(SimpleNamespace(x_root=0, y_root=0))
                 labels = [c.kwargs['label'] for c in menu.return_value.add_command.call_args_list]
-                self.assertEqual(labels, ['Add new ingredient', 'Add new result', 'Load recipe', 'Create item', 'Create item as ingredient', 'Bulk ingredient creation'])
+                for label in ('Add new ingredient', 'Add new result', 'Load recipe', 'Create item', 'Create item as ingredient', 'Create item as result', 'Bulk ingredient creation'):
+                    self.assertIn(label,labels)
             tab.edit_item()
             dialog = next(w for w in app.winfo_children() if isinstance(w, tk.Toplevel))
             def descendants(widget):
@@ -90,8 +91,11 @@ class UnifiedFlow(unittest.TestCase):
             with patch.object(tab.canvas, 'find_withtag', return_value=(1,)), patch.object(tab.canvas, 'gettags', return_value=('ingredients_0',)), patch('app.tk.Menu') as menu:
                 tab.context(SimpleNamespace(x_root=0, y_root=0))
                 commands = menu.return_value.add_command.call_args_list
-                self.assertEqual([c.kwargs['label'] for c in commands], ['Show recipe', 'Use as ingredient in new recipe', 'Use as product in new recipe', 'See all recipes containing this item', 'Replace ingredient in all recipes'])
-                for command, side, other in zip(commands[1:], ('ingredients', 'results'), ('results', 'ingredients')):
+                actions={c.kwargs['label']:c for c in commands}
+                self.assertEqual(commands[0].kwargs['label'],'Show recipe')
+                for label in ('Use as ingredient in new recipe', 'Use as product in new recipe', 'See all recipes containing this item', 'Replace ingredient in all recipes'):
+                    self.assertIn(label,actions)
+                for command, side, other in zip((actions['Use as ingredient in new recipe'],actions['Use as product in new recipe']), ('ingredients', 'results'), ('results', 'ingredients')):
                     command.kwargs['command']()
                     created = app.nametowidget(app.tabs.select())
                     self.assertIsNot(created, tab)

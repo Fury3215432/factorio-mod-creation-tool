@@ -63,6 +63,55 @@ class MachineTests(unittest.TestCase):
         self.assertNotIn('sulfur', imported)
         self.assertEqual(importable_recipes(Catalog(merged), [('assembling-machine', 'my-workshop')]), ['iron-gear-wheel'])
 
+    @unittest.skipUnless(Path('.cache/test-catalog.json').exists(), 'Requires cached game catalog')
+    def test_sprite_sheet_animation(self):
+        from machine_model import animation_settings
+        from installation import find_installation
+        work = self.directory()
+        catalog = Catalog(json.loads(Path('.cache/test-catalog.json').read_text(encoding='utf-8')))
+        value = machine()
+        value.update(sprite=sprite_asset(make_icon(work / 'sheet.png')), frame_width=16, frame_height=16,
+                     frame_count=4, line_length=2, animation_speed=.5, run_mode='forward-then-backward')
+        project = Project()
+        project.data['machines']['animated-workshop'] = value
+        validate_machine('animated-workshop', value, catalog, project)
+        entity, _ = prototypes('animated-workshop', value, catalog.raw)
+        animation = entity.get('graphics_set', {}).get('animation', entity.get('animation'))
+        self.assertEqual(animation['frame_count'], 4)
+        self.assertEqual(animation['line_length'], 2)
+        self.assertEqual(animation['width'], 16)
+        self.assertEqual(animation['animation_speed'], .5)
+        self.assertEqual(animation['run_mode'], 'forward-then-backward')
+        enlarged, _ = prototypes('animated-workshop', dict(value, visual_scale=2), catalog.raw)
+        large_animation = enlarged.get('graphics_set', {}).get('animation', enlarged.get('animation'))
+        self.assertEqual(large_animation['scale'], animation['scale'] * 2)
+        for key in ('collision_box', 'selection_box', 'tile_width', 'tile_height', 'fluid_boxes', 'vector_to_place_result'):
+            self.assertEqual(enlarged.get(key), entity.get(key))
+        self.assertEqual(large_animation['frame_count'], 4)
+        with self.assertRaises(ValueError):
+            validate_machine('animated-workshop', dict(value, visual_scale=0), catalog, project)
+
+        bad = dict(value, frame_count=5)
+        with self.assertRaisesRegex(ValueError, 'fit inside'):
+            animation_settings(bad)
+        bad = dict(value, animation_speed=0)
+        with self.assertRaises(ValueError):
+            animation_settings(bad)
+        path = work / 'project.json'
+        project.save(path)
+        self.assertEqual(Project.open(path).data['machines']['animated-workshop']['frame_count'], 4)
+        root = find_installation()
+        if root:
+            mods = work / 'mods'
+            mods.mkdir()
+            archive = work / 'recipe-studio-project_1.0.0.zip'
+            project.export(archive, catalog, root, mods)
+            loaded, _, _ = load_game(root, [archive], work / 'engine')
+            entity = loaded.raw['assembling-machine']['animated-workshop']
+            animation = entity.get('graphics_set', {}).get('animation', entity.get('animation'))
+            self.assertEqual(animation['frame_count'], 4)
+            self.assertEqual(animation['line_length'], 2)
+
     @unittest.skipUnless(os.environ.get('FACTORIO_TEST_INSTALL'), 'Set FACTORIO_TEST_INSTALL for engine tests')
     def test_machine_engine_and_runtime(self):
         root = Path(os.environ['FACTORIO_TEST_INSTALL'])

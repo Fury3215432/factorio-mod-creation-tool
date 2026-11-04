@@ -91,7 +91,7 @@ class UIWorkflow(unittest.TestCase):
             main = notebook.winfo_children()[0]
             fill(main, 'Technology ID', 'ui-research')
             fill(main, 'Prerequisites', 'automation')
-            fill(main, 'Recipe unlocks', 'ui-component')
+            tree.editor_vars['unlocks'].set('ui-component')
             fill(main, 'Research count', '25')
             self.assertTrue(app.undo())
             self.assertEqual(tree.editor_vars['count'].get(), '10')
@@ -157,7 +157,7 @@ class UIWorkflow(unittest.TestCase):
             machine_tab = app.nametowidget(app.tabs.select())
             self.assertFalse(machine_tab.ready)
             chooser = next(w for w in app.winfo_children() if isinstance(w, tk.Toplevel))
-            next(w for w in chooser.winfo_children() if isinstance(w, ttk.Button) and w.cget('text') == 'Choose template').invoke()
+            next(w for w in chooser.winfo_children() if isinstance(w, ttk.Button) and w.cget('text') == 'Create variant').invoke()
             listing = next(w for w in chooser.winfo_children() if isinstance(w, tk.Listbox))
             index = next(i for i, text in enumerate(listing.get(0, 'end')) if text.startswith('assembling-machine-3 '))
             listing.selection_set(index)

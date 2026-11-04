@@ -1,3 +1,4 @@
+import copy
 """Factorio-style technology tiles and an in-tab editor sidebar."""
 import tkinter as tk
 from collections import defaultdict, deque
@@ -65,7 +66,7 @@ class TechTab(ttk.Frame):
         split.add(self.sidebar, minsize=340, width=430, stretch='never')
         self.editor_host = ttk.Frame(self.sidebar)
         ttk.Label(self.editor_host, text='Select a technology', font=('Segoe UI', 16, 'bold'), padding=16).pack(anchor='w')
-        ttk.Label(self.editor_host, text='Select a technology in the tree.\nResearch settings and properties open here.', padding=16).pack(anchor='w')
+        help_label(self.editor_host, 'Select a technology in the tree.\nResearch settings and properties open here.')
         self.editor_host.pack(fill='both', expand=True)
         holder = ttk.Frame(split)
         split.add(holder, minsize=300, stretch='always')
@@ -89,7 +90,7 @@ class TechTab(ttk.Frame):
         bind_navigation(self, self.draw)
         self.count = tk.StringVar()
         ttk.Label(self, textvariable=self.count, padding=(12, 5)).pack(anchor='w')
-        ttk.Label(self, text='Drag empty space to pan · See Settings → Keyboard for shortcuts and mouse controls', padding=(12, 0, 12, 8)).pack(anchor='w')
+        help_label(self, 'Drag empty space to pan · See Settings → Keyboard for shortcuts and mouse controls', wraplength=1100, padx=12)
         self.refresh()
         if 'automation' in self.technologies:
             self.initial_job = self.after_idle(self.select_initial)
@@ -188,12 +189,14 @@ class TechTab(ttk.Frame):
 
     def snapshot(self):
         return {'selected': self.selected, 'values': {k: v.get() for k, v in self.editor_vars.items()},
-                'json': self.editor_text.get('1.0', 'end-1c'), 'dirty': self.dirty, 'multi_selected': set(self.multi_selected)}
+                'json': self.editor_text.get('1.0', 'end-1c'), 'dirty': self.dirty, 'multi_selected': set(self.multi_selected),
+                'icon_choices': copy.deepcopy(getattr(self, 'editor_icon_choices', {}))}
 
     def restore(self, state):
         from editors import technology_dialog
         technology_dialog(self, state['selected'], force=True)
         self.editor_tracking = False
+        self.editor_icon_choices = copy.deepcopy(state.get('icon_choices', {}))
         for key, value in state['values'].items():
             self.editor_vars[key].set(value)
         self.editor_text.delete('1.0', 'end')
@@ -207,10 +210,17 @@ class TechTab(ttk.Frame):
         self.last_editor_state = self.snapshot()
 
     def context(self, event):
-        if self.canvas.find_withtag('current'):
-            return
+        name = self.node_name()
+        if hasattr(self, 'context_menu'):
+            self.context_menu.destroy()
         menu = tk.Menu(self, tearoff=False)
-        menu.add_command(label='Create new technology', command=lambda: self.edit())
+        self.context_menu = menu
+        if name:
+            from delete_items import delete_technology
+            menu.add_command(label='Edit technology', command=lambda: self.edit(name))
+            menu.add_command(label='Delete technology', command=lambda: delete_technology(self, name))
+        else:
+            menu.add_command(label='Create new technology', command=lambda: self.edit())
         menu.tk_popup(event.x_root, event.y_root)
 
     def show_all(self):

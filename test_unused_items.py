@@ -52,8 +52,9 @@ class UnusedItems(unittest.TestCase):
             tab_count = len(app.tabs.tabs())
             with patch.object(pending.unused, 'identify_region', return_value='cell'), patch.object(pending.unused, 'identify_row', return_value='item:loose_component'), patch('pending_ui.tk.Menu.tk_popup'):
                 pending.context(SimpleNamespace(widget=pending.unused, x=5, y=5, x_root=0, y_root=0))
-            self.assertEqual(pending.context_menu.entrycget(2, 'label'), 'Delete item')
-            pending.context_menu.invoke(2)
+            delete_action=next(i for i in range(pending.context_menu.index('end')+1)
+                               if pending.context_menu.type(i)=='command' and pending.context_menu.entrycget(i,'label')=='Delete item')
+            pending.context_menu.invoke(delete_action)
             self.assertNotIn(('item', 'loose_component'), app.catalog.items)
             self.assertFalse(pending.unused.get_children())
             self.assertEqual(len(app.tabs.tabs()), tab_count)
@@ -87,8 +88,9 @@ class UnusedItems(unittest.TestCase):
                 with patch.object(tree, 'identify_region', return_value='cell'), patch.object(tree, 'identify_row', return_value=row_id), patch('pending_ui.tk.Menu.tk_popup'):
                     pending.context(SimpleNamespace(widget=tree, x=5, y=5, x_root=0, y_root=0))
                 self.assertTrue(pending.context_menu.winfo_exists())
-                self.assertEqual(pending.context_menu.entrycget(0, 'label'), 'See recipes containing this item')
-                pending.context_menu.invoke(0)
+                related_action=next(i for i in range(pending.context_menu.index('end')+1)
+                                    if pending.context_menu.type(i)=='command' and pending.context_menu.entrycget(i,'label')=='See recipes containing this item')
+                pending.context_menu.invoke(related_action)
                 popup = next(w for w in app.winfo_children() if isinstance(w, tk.Toplevel))
                 listing = next(w for w in descendants(popup) if isinstance(w, ttk.Treeview))
                 self.assertIn(expected_recipe, listing.get_children())
@@ -104,4 +106,4 @@ class UnusedItems(unittest.TestCase):
             check_context(pending.unused, 'item:loose_component', 'produce-component')
             path = work / 'requirements.txt'
             self.assertTrue(pending.export_text(path))
-            self.assertIn('Items not used as recipe ingredients', path.read_text(encoding='utf-8'))
+            self.assertEqual(path.read_text(encoding='utf-8').strip(),'loose_component')

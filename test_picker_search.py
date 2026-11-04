@@ -44,6 +44,20 @@ class PickerSearch(unittest.TestCase):
             self.assertTrue(tab.save_changes())
             self.assertEqual(app.project.data['recipes']['inserter']['ingredients'][-1]['name'], name)
             self.assertFalse(errors.called, errors.call_args_list)
+            app.catalog.recipes['ReCyClInG_test'] = app.catalog.recipes['inserter']
+            recipe_picker = Picker(app, lambda key: None, recipe_names=True)
+            self.assertTrue(recipe_picker.hide_recycling.get())
+            self.assertFalse(any('recycling' in key[1].casefold() for key in recipe_picker.matches))
+            recipe_picker.query.set('recycling')
+            self.assertEqual(recipe_picker.matches, [])
+            from tkinter import ttk
+            toggle = next(w for w in recipe_picker.winfo_children() if isinstance(w, ttk.Checkbutton))
+            toggle.invoke()
+            self.assertIn(('recipe', 'ReCyClInG_test'), recipe_picker.matches)
+            toggle.invoke()
+            self.assertEqual(recipe_picker.matches, [])
+            recipe_picker.destroy()
+
             if os.environ.get('FACTORIO_TEST_INSTALL'):
                 path = work / 'motor-search-test_1.0.0.zip'
                 app.project.export(path, Catalog(app.base_raw), app.root_path, app.mods_path, mod_name='motor-search-test')

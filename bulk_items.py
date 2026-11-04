@@ -72,7 +72,7 @@ def bulk_item_dialog(tab):
     text = tk.Text(dialog, height=5, wrap='word', undo=True, bg='#273240', fg='#e6edf3', insertbackground='#e6edf3')
     text.pack(fill='x', padx=12)
     help_label(dialog, 'One space joins words in an item name and becomes _ in its ID. Two or more spaces separate items. New lines and tabs also separate items.\nExample: copper plate  iron ore → copper_plate and iron_ore. Display names keep the words you entered.', wraplength=720, padx=12)
-    help_label(dialog, 'Apply saves normal ingredient items with stack size 100 and the default checkerboard icon. They become available in pickers and Browse creations. Add their recipes and icons afterward in Pending requirements. No rectangles are added automatically.', wraplength=720, padx=12)
+    help_label(dialog, 'Apply saves normal ingredient items with stack size 100 and the default checkerboard icon. They become available in pickers and Browse creations. Add their recipes and icons afterward in Suggested actions. No rectangles are added automatically.', wraplength=720, padx=12)
     holder = ttk.Frame(dialog, padding=12)
     holder.pack(fill='both', expand=True)
     preview = ttk.Treeview(holder, columns=('id', 'title'), show='headings', height=6)

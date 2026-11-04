@@ -22,6 +22,22 @@ def tint_preview(image, color):
     return result
 
 
+def shift_graphics(value, offset):
+    """Translate sprite layers only; ports and collision geometry stay fixed."""
+    if isinstance(value, list):
+        for child in value:
+            shift_graphics(child, offset)
+    elif isinstance(value, dict):
+        if any(key in value for key in ('filename', 'filenames', 'stripes')) and any(key in value for key in ('width', 'size', 'stripes')):
+            previous = value.get('shift', [0, 0])
+            if isinstance(previous, dict):
+                previous = [previous.get('x', 0), previous.get('y', 0)]
+            value['shift'] = [previous[0] + offset[0], previous[1] + offset[1]]
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                shift_graphics(child, offset)
+
+
 def transform_graphics(value, factor, color):
     if isinstance(value, list):
         for child in value:

@@ -41,6 +41,29 @@ class RecipeUnlocks(unittest.TestCase):
         loaded = dict(raw, recipe={name: recipe['original'] for name, recipe in project.data['recipes'].items()})
         loaded_project = Project()
         self.assertEqual(loaded_project.recipes_missing_unlocks(Catalog(loaded), loaded['recipe']), ['component_recipe', 'intermediate_recipe'])
+        from recipe_unlocks import include_ingredient_recipes
+        from types import SimpleNamespace
+        app = SimpleNamespace(project=loaded_project, catalog=Catalog(loaded))
+        self.assertEqual(include_ingredient_recipes(app, ['finished_recipe']), ['finished_recipe', 'component_recipe'])
+        # Dependency cycles terminate without adding duplicate recipe IDs.
+        loaded['recipe']['intermediate_recipe']['ingredients'] = [{'type': 'item', 'name': 'finished', 'amount': 1}]
+        app.catalog = Catalog(loaded)
+        self.assertEqual(include_ingredient_recipes(app, ['finished_recipe']), ['finished_recipe', 'component_recipe'])
+        self.assertFalse(loaded_project.data['technologies'])
+        loaded['technology']['earlier'] = {'name': 'earlier', 'effects': [{'type': 'unlock-recipe', 'recipe': 'component_recipe'}]}
+        loaded['technology']['middle'] = {'name': 'middle', 'prerequisites': ['earlier']}
+        loaded['technology']['assembly']['prerequisites'] = ['middle']
+        app.catalog = Catalog(loaded)
+        self.assertEqual(include_ingredient_recipes(app, ['finished_recipe'], 'assembly'), ['finished_recipe'])
+        # An unrelated technology is not an earlier prerequisite.
+        loaded['technology']['assembly']['prerequisites'] = []
+        app.catalog = Catalog(loaded)
+        self.assertEqual(include_ingredient_recipes(app, ['finished_recipe'], 'assembly'), ['finished_recipe', 'component_recipe'])
+        loaded['recipe']['component_recipe']['enabled'] = True
+        app.catalog = Catalog(loaded)
+        self.assertEqual(include_ingredient_recipes(app, ['finished_recipe'], 'assembly'), ['finished_recipe'])
+
+
 
     def test_locked_default_assign_create_enable_and_undo(self):
         work = Path(tempfile.mkdtemp(dir=Path('.cache').resolve()))
@@ -72,6 +95,27 @@ class RecipeUnlocks(unittest.TestCase):
             app.pending_tab()
             pending = app.nametowidget(app.tabs.select())
             self.assertIn(name, pending.unlocks.get_children())
+            # Ingredient assignment is opt-in, recursive, and one undoable batch.
+            pending.unlocks.selection_set(name)
+            ingredient_dialog = pending.fix_unlock()
+            def walk(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from walk(child)
+            checkbox = next(w for w in walk(ingredient_dialog) if isinstance(w, ttk.Checkbutton))
+            self.assertFalse(bool(ingredient_dialog.getvar(checkbox.cget('variable'))))
+            checkbox.invoke()
+            tech_list = next(w for w in walk(ingredient_dialog) if isinstance(w, tk.Listbox))
+            tech_index = list(tech_list.get(0, 'end')).index('automation-2')
+            tech_list.selection_clear(0, 'end')
+            tech_list.selection_set(tech_index)
+            undo_count = len(app.undo_stack)
+            next(w for w in walk(ingredient_dialog) if isinstance(w, ttk.Button) and w.cget('text') == 'Add to selected technology').invoke()
+            self.assertEqual(len(app.undo_stack), undo_count + 1)
+            self.assertEqual(app.project.recipe_unlocks('unlock_precursor_recipe', app.base_raw), ['automation-2'])
+            self.assertEqual(app.project.recipe_unlocks(name, app.base_raw), ['automation-2'])
+            self.assertTrue(app.undo())
+            self.assertEqual(app.project.recipe_unlocks('unlock_precursor_recipe', app.base_raw), [])
             pending.unlocks.selection_set(name)
             dialog = pending.fix_unlock()
             def descendants(widget):
@@ -91,6 +135,39 @@ class RecipeUnlocks(unittest.TestCase):
             self.assertTrue(app.undo())
             self.assertIn(name, pending.unlocks.get_children())
             self.assertIn('unlock_precursor_recipe', pending.unlocks.get_children())
+            pending.unlocks.selection_set(name, 'unlock_precursor_recipe')
+            count = len(app.undo_stack)
+            self.assertTrue(pending.unlock_selected_from_start())
+            self.assertEqual(len(app.undo_stack), count + 1)
+            for recipe_id in (name, 'unlock_precursor_recipe'):
+                self.assertTrue(app.catalog.recipes[recipe_id]['enabled'])
+                self.assertNotIn(recipe_id, pending.unlocks.get_children())
+            self.assertTrue(tab.enabled.get())
+            self.assertTrue(app.undo())
+            for recipe_id in (name, 'unlock_precursor_recipe'):
+                self.assertFalse(app.catalog.recipes[recipe_id]['enabled'])
+                self.assertIn(recipe_id, pending.unlocks.get_children())
+            # Assign both selected missing unlocks in a single transaction.
+            pending.unlocks.selection_set(name, 'unlock_precursor_recipe')
+            dialog = pending.fix_unlock()
+            listing = next(w for w in descendants(dialog) if isinstance(w, tk.Listbox))
+            index = list(listing.get(0, 'end')).index('automation-2')
+            listing.selection_clear(0, 'end')
+            listing.selection_set(index)
+            count = len(app.undo_stack)
+            next(w for w in descendants(dialog) if isinstance(w, ttk.Button) and w.cget('text') == 'Add to selected technology').invoke()
+            self.assertEqual(len(app.undo_stack), count + 1)
+            for recipe_id in (name, 'unlock_precursor_recipe'):
+                self.assertEqual(app.project.recipe_unlocks(recipe_id, app.base_raw), ['automation-2'])
+                self.assertNotIn(recipe_id, pending.unlocks.get_children())
+            self.assertTrue(app.undo())
+            for recipe_id in (name, 'unlock_precursor_recipe'):
+                self.assertIn(recipe_id, pending.unlocks.get_children())
+            # Validate the entire batch before making any changes.
+            before = copy.deepcopy(app.project.data)
+            with self.assertRaises(ValueError):
+                assign_unlock(pending, [name, 'nonexistent-recipe'], 'automation-2')
+            self.assertEqual(app.project.data, before)
             pending.unlocks.selection_set(name)
             dialog = pending.fix_unlock()
             next(w for w in descendants(dialog) if isinstance(w, ttk.Button) and w.cget('text') == 'Create new technology').invoke()
