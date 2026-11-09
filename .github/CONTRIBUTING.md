@@ -6,4 +6,4 @@ Open an issue to discuss a change before submitting it. Do not include private p
 
 External contributions must be reviewed and authorized by the maintainer. No automation in this repository merges pull requests or grants access.
 
-No open-source license has been selected for this project. Do not assume that publishing the source grants a separate redistribution or derivative-work license. Factorio and its artwork belong to Wube Software.
+The project's source is available under the [MIT License with Commons Clause License Condition v1.0](../LICENSE). It may be used, modified and shared under those terms, but the Commons Clause restricts selling the tool or substantially equivalent software. This is a source-available license, not an OSI-approved open-source license. Submitted contributions must be yours to license under these terms. Factorio and its artwork belong to Wube Software and are not covered by the tool's license.
