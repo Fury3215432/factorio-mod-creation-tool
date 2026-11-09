@@ -2,6 +2,14 @@
 
 A Windows desktop recipe editor using Python's built-in Tkinter. Requires Python 3.10+ with Tkinter and a licensed Factorio installation supporting `--dump-data` (1.1.77+ or 2.x). No pip packages required.
 
+## License and rights to your creations
+
+**Factorio Mod Creation Tool is source-available under the [MIT License with the Commons Clause License Condition v1.0](LICENSE).** It is free to download, use, modify and redistribute under these terms, including for commercial mod-development work. The Commons Clause prohibits selling the tool itself or a product/service whose value derives entirely or substantially from the tool's functionality, including substantially equivalent modified versions, without separate permission from the copyright holder. See [LICENSE](LICENSE) for the complete binding terms.
+
+**Your work is yours:** Mods, recipes, sprites and other original content you create with this tool can be used, shared and sold commercially. The tool's license does not claim ownership of independently created output, require a royalty, or require credit in your mods. You are responsible for respecting Factorio's terms and any third-party rights in game data, assets, or mods you use.
+
+This license covers only material the project has the rights to license; it **does not license Factorio or its artwork**. See [third-party notices](THIRD_PARTY_NOTICES.md). The Commons Clause makes the tool **source-available, not OSI-approved open source**. Its resale restriction is based on substantial value; it does not categorically prohibit commercial products that add substantial independent value.
+
 ## Help others discover the tool
 
 If this app helped you make your mod, please consider mentioning **Factorio Mod Creation Tool by FuryziN** in your mod description and linking to [the GitHub repository](https://github.com/Fury3215432/factorio-mod-creation-tool). This is optional, but it helps other mod creators discover the app.
