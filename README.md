@@ -4,9 +4,9 @@ A Windows desktop recipe editor using Python's built-in Tkinter. Requires Python
 
 ## Help others discover the tool
 
-If this app helped you make your mod, please consider mentioning **Factorio Mod Creation Tool by FuryziN** in your mod description and linking to [the tool’s website](https://fury3215432.github.io/factorio-mod-creation-tool/). This is optional, but it helps other mod creators discover the app.
+If this app helped you make your mod, please consider mentioning **Factorio Mod Creation Tool by FuryziN** in your mod description and linking to [the GitHub repository](https://github.com/Fury3215432/factorio-mod-creation-tool). This is optional, but it helps other mod creators discover the app.
 
-Suggested credit: “Created with Factorio Mod Creation Tool by FuryziN: https://fury3215432.github.io/factorio-mod-creation-tool/”
+Suggested credit: “Created with Factorio Mod Creation Tool by FuryziN: https://github.com/Fury3215432/factorio-mod-creation-tool”
 
 ## Open the app
 

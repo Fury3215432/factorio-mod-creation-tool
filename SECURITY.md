@@ -1,6 +1,6 @@
 # Security and privacy
 
-Factorio Mod Creation Tool is a local desktop app by FuryziN. It has no analytics, accounts, or telemetry. The project website contains no trackers, forms, or third-party scripts.
+Factorio Mod Creation Tool is a local desktop app by FuryziN. It has no analytics, accounts, or telemetry.
 
 The app runs the installed Factorio executable to load game and mod data. Load only mods you trust. A supplied mod's Lua scripts run in Factorio's normal data stage.
 

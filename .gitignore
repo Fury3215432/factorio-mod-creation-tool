@@ -12,7 +12,6 @@ repair_mod.py
 *.key
 *.pfx
 *.zip
-!docs/downloads/factorio-mod-creation-tool.zip
 *.log
 *.studio.json
 dist/
